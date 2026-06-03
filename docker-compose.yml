@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: apex_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - apex_data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DUCKDB_DATABASE_PATH=/app/data/apex.db
+      - DEVICE=cpu # Can be adjusted to cuda if GPU is present
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: apex_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    depends_on:
+      - backend
+    restart: always
+
+volumes:
+  apex_data:
