@@ -497,6 +497,7 @@ class EnsembleForecaster:
     State-of-the-art Multi-Model Ensemble engine wrapping TFT Attention,
     Robust Ridge, Gradient Boosting, and Holt-Winters Exponential Smoothing.
     Fits models, evaluates out-of-fold MAPE, and dynamically yields predictions.
+    Customizes ensembling weights and conformal envelopes using fundamental metrics.
     """
     def __init__(self, seq_len: int = 15):
         self.seq_len = seq_len
@@ -505,8 +506,46 @@ class EnsembleForecaster:
         self.gbr = RobustGBRegressor(seq_len=seq_len)
         self.hw = HoltWintersRegressor()
         self.weights = {"tft": 0.4, "ridge": 0.2, "gbr": 0.2, "hw": 0.2}
+        self.conformal_multiplier = 1.0
+        self.regime_label = "⚖️ STANDARD COMPOSITE"
+
+    def calibrate_weights_with_fundamentals(self, fundamentals: dict) -> Tuple[dict, float, str]:
+        """
+        Calibrates base ensemble weights and conformal scale multiplier based on fundamentals:
+        market_cap, pe_ratio, roce, roe, debt_to_equity, dividend_yield, book_value, sales_growth.
+        """
+        if not fundamentals:
+            return {"tft": 0.30, "ridge": 0.25, "gbr": 0.25, "hw": 0.20}, 1.0, "⚖️ STANDARD COMPOSITE"
+            
+        pe = fundamentals.get("pe_ratio", 0.0)
+        roe = fundamentals.get("roe", 0.0)
+        de = fundamentals.get("debt_to_equity", 0.0)
         
-    def fit(self, X: np.ndarray, y: np.ndarray):
+        # 1. 💎 HIGH-GROWTH QUALITY
+        # Criteria: High ROE (>= 15%) and moderate/high PE (>= 15) indicating high quality growth
+        if roe >= 15.0 and pe >= 15.0:
+            weights = {"tft": 0.50, "ridge": 0.15, "gbr": 0.25, "hw": 0.10}
+            return weights, 0.95, "💎 HIGH-GROWTH QUALITY"
+            
+        # 2. ⚠️ HIGH LEVERAGE / RISK
+        # Criteria: High Debt to Equity (>= 1.5) or negative ROE indicating financial leverage stress
+        if de >= 1.5 or roe < 0.0:
+            # GBR tree structures capture sudden shocks, Ridge/HW are structural/defensive
+            weights = {"tft": 0.20, "ridge": 0.20, "gbr": 0.40, "hw": 0.20}
+            return weights, 1.25, "⚠️ HIGH LEVERAGE / RISK"
+            
+        # 3. 📈 VALUE / CYCLICAL
+        # Criteria: Low PE (< 15) and low Debt to Equity (< 1.0) indicating solid value stocks
+        if pe > 0.0 and pe < 15.0 and de < 1.0:
+            # Linear & statistical trends dominate mean-reverting defensive value stocks
+            weights = {"tft": 0.15, "ridge": 0.35, "gbr": 0.20, "hw": 0.30}
+            return weights, 1.0, "📈 VALUE / CYCLICAL"
+            
+        # 4. ⚖️ STANDARD COMPOSITE (Default)
+        weights = {"tft": 0.30, "ridge": 0.25, "gbr": 0.25, "hw": 0.20}
+        return weights, 1.0, "⚖️ STANDARD COMPOSITE"
+        
+    def fit(self, X: np.ndarray, y: np.ndarray, fundamentals: dict = None):
         n = len(X)
         split = max(self.seq_len * 2, int(n * 0.80))
         
@@ -519,7 +558,10 @@ class EnsembleForecaster:
         self.gbr.fit(X_train, y_train)
         self.hw.fit(X_train, y_train)
         
-        # Predict on validation set
+        # Calibrate base prior weights using Screener fundamentals
+        prior_weights, self.conformal_multiplier, self.regime_label = self.calibrate_weights_with_fundamentals(fundamentals)
+        
+        # Predict on validation set to get data-driven validation weights
         if len(X_val) > self.seq_len + 2:
             preds_tft = self.tft.predict(X_val)
             preds_ridge = self.ridge.predict(X_val)
@@ -545,13 +587,27 @@ class EnsembleForecaster:
             inv_hw = 1.0 / mape_hw
             
             total_inv = inv_tft + inv_ridge + inv_gbr + inv_hw
-            self.weights["tft"] = round(inv_tft / total_inv, 3)
-            self.weights["ridge"] = round(inv_ridge / total_inv, 3)
-            self.weights["gbr"] = round(inv_gbr / total_inv, 3)
-            self.weights["hw"] = round(inv_hw / total_inv, 3)
-            print(f"[ENSEMBLE CALIBRATED] Weights: {self.weights}")
+            val_weights = {
+                "tft": inv_tft / total_inv,
+                "ridge": inv_ridge / total_inv,
+                "gbr": inv_gbr / total_inv,
+                "hw": inv_hw / total_inv
+            }
+            
+            # Bayesian update: 60% fundamental prior, 40% validation performance
+            for m in self.weights:
+                self.weights[m] = round(0.60 * prior_weights[m] + 0.40 * val_weights[m], 3)
+                
+            # Normalize to sum to exactly 1.0
+            sum_w = sum(self.weights.values())
+            for m in self.weights:
+                self.weights[m] = round(self.weights[m] / sum_w, 3)
+            # Re-verify and absorb small rounding residual in tft
+            self.weights["tft"] = round(1.0 - sum(w for k, w in self.weights.items() if k != "tft"), 3)
+            
+            print(f"[ENSEMBLE CALIBRATED] Fundamentals-driven Weights: {self.weights} under regime {self.regime_label}")
         else:
-            self.weights = {"tft": 0.40, "ridge": 0.20, "gbr": 0.20, "hw": 0.20}
+            self.weights = prior_weights
             
         # Fit on whole dataset to prepare for final forecast
         self.tft.fit(X, y)
@@ -581,6 +637,8 @@ class EnsembleForecaster:
             "ridge": p_ridge,
             "gbr": p_gbr,
             "hw": p_hw,
-            "weights": self.weights
+            "weights": self.weights,
+            "conformal_multiplier": self.conformal_multiplier,
+            "regime_label": self.regime_label
         }
 

@@ -95,6 +95,23 @@ class DatabaseManager:
                     PRIMARY KEY (timestamp, ticker)
                 )
             """)
+
+            # 6. Fundamental Metrics Table (Screener.in & yfinance)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS fundamental_metrics (
+                    ticker VARCHAR PRIMARY KEY,
+                    market_cap DOUBLE,
+                    pe_ratio DOUBLE,
+                    roce DOUBLE,
+                    roe DOUBLE,
+                    debt_to_equity DOUBLE,
+                    dividend_yield DOUBLE,
+                    book_value DOUBLE,
+                    sales_growth DOUBLE,
+                    source VARCHAR,
+                    updated_at TIMESTAMP
+                )
+            """)
             print("DuckDB tables initialized successfully.")
         except Exception as e:
             print(f"Error initializing DuckDB tables: {e}")

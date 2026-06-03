@@ -383,6 +383,27 @@ def trigger_pipeline(
         db_manager.execute(f"DELETE FROM processed_features WHERE ticker = '{ticker}'")
         db_manager.save_dataframe("processed_features", features_df, if_exists="append")
         
+        # Fetch and save fundamentals from Screener.in / yfinance fallback
+        fundamentals = {"market_cap": 0.0, "pe_ratio": 0.0, "roce": 0.0, "roe": 0.0, "debt_to_equity": 0.0, "dividend_yield": 0.0, "book_value": 0.0, "sales_growth": 0.0, "source": "None"}
+        try:
+            fundamentals = apex_ingestor.scrape_screener_fundamentals(ticker)
+            fund_df = pd.DataFrame([{
+                'ticker': ticker,
+                'market_cap': fundamentals['market_cap'],
+                'pe_ratio': fundamentals['pe_ratio'],
+                'roce': fundamentals['roce'],
+                'roe': fundamentals['roe'],
+                'debt_to_equity': fundamentals['debt_to_equity'],
+                'dividend_yield': fundamentals['dividend_yield'],
+                'book_value': fundamentals['book_value'],
+                'sales_growth': fundamentals['sales_growth'],
+                'source': fundamentals['source'],
+                'updated_at': datetime.now()
+            }])
+            db_manager.save_dataframe("fundamental_metrics", fund_df, if_exists="append")
+        except Exception as e:
+            print(f"Failed to fetch and save fundamentals: {e}")
+
         # Ensure timestamp is clean string representation
         aligned_df['timestamp'] = pd.to_datetime(aligned_df['timestamp']).dt.strftime('%Y-%m-%d')
         
@@ -396,6 +417,7 @@ def trigger_pipeline(
                 "alpha_annualized": alpha,
                 "correlation": correlation
             },
+            "fundamentals": fundamentals,
             "preview": aligned_df.tail(100).to_dict(orient="records")
         }
     except Exception as e:
@@ -445,6 +467,7 @@ def predict_forecast_envelope(
     """
     Executes the multi-model weighted ensemble forecasting engine, calibrates error residual models
     via conformal regression, and outputs the strict 90% and 95% forecast envelopes.
+    Customizes ensembling and conformal widths based on Screener/Yahoo Finance fundamental metrics.
     """
     try:
         # 1. Load aligned preprocessed features
@@ -456,6 +479,34 @@ def predict_forecast_envelope(
         N = len(df)
         if N < 50:
             raise HTTPException(status_code=400, detail="Insufficient data to train quantitative forecasting models.")
+
+        # Load fundamentals from DuckDB or dynamically scrape if missing
+        fundamentals = {"market_cap": 0.0, "pe_ratio": 0.0, "roce": 0.0, "roe": 0.0, "debt_to_equity": 0.0, "dividend_yield": 0.0, "book_value": 0.0, "sales_growth": 0.0, "source": "None"}
+        try:
+            fund_q = f"SELECT * FROM fundamental_metrics WHERE ticker = '{ticker}'"
+            fund_df = db_manager.load_dataframe(fund_q)
+            if not fund_df.empty:
+                fundamentals = fund_df.iloc[0].to_dict()
+                if 'updated_at' in fundamentals:
+                    fundamentals['updated_at'] = str(fundamentals['updated_at'])
+            else:
+                fundamentals = apex_ingestor.scrape_screener_fundamentals(ticker)
+                save_df = pd.DataFrame([{
+                    'ticker': ticker,
+                    'market_cap': fundamentals['market_cap'],
+                    'pe_ratio': fundamentals['pe_ratio'],
+                    'roce': fundamentals['roce'],
+                    'roe': fundamentals['roe'],
+                    'debt_to_equity': fundamentals['debt_to_equity'],
+                    'dividend_yield': fundamentals['dividend_yield'],
+                    'book_value': fundamentals['book_value'],
+                    'sales_growth': fundamentals['sales_growth'],
+                    'source': fundamentals['source'],
+                    'updated_at': datetime.now()
+                }])
+                db_manager.save_dataframe("fundamental_metrics", save_df, if_exists="append")
+        except Exception as e:
+            print(f"Fundamentals resolution failed in predict: {e}")
 
         # Calculate returns
         log_returns = np.log(df['close_raw'] / df['close_raw'].shift(1)).fillna(0.0).values
@@ -486,12 +537,14 @@ def predict_forecast_envelope(
         last_date = pd.to_datetime(df['timestamp'].iloc[-1])
         future_dates = get_nse_trading_days(
             start_date=last_date + timedelta(days=1), 
-            end_date=last_date + timedelta(days=horizon_steps * 2.5) # extra pad to ensure enough days
+            end_date=last_date + timedelta(days=horizon_steps * 2.5)
         )[:horizon_steps]
 
         # Execute Conformal predictions iteratively for each step h to generate a dynamic path
         forecast_records = []
         ensemble_weights = {"tft": 0.40, "ridge": 0.20, "gbr": 0.20, "hw": 0.20}
+        fundamental_regime = "⚖️ STANDARD COMPOSITE"
+        conformal_multiplier = 1.0
         print(f"Generating dynamic ensemble forecast path across {horizon_steps} sessions...")
         
         for h in range(1, horizon_steps + 1):
@@ -501,13 +554,15 @@ def predict_forecast_envelope(
             train_features_h = X[:-h]
             train_targets_h = y_h[:-h]
             
-            # Fit and run the multi-model ensemble
+            # Fit and run the multi-model ensemble with fundamentals
             ensemble = EnsembleForecaster(seq_len=seq_len)
-            ensemble.fit(train_features_h, train_targets_h)
+            ensemble.fit(train_features_h, train_targets_h, fundamentals=fundamentals)
             
             # Save weights from the final step for return metadata
             if h == horizon_steps:
                 ensemble_weights = ensemble.weights
+                fundamental_regime = ensemble.regime_label
+                conformal_multiplier = ensemble.conformal_multiplier
                 
             pred_dict = ensemble.predict(test_features)
             
@@ -525,11 +580,19 @@ def predict_forecast_envelope(
             l90, u90 = float(bounds_90_h[-1, 0]), float(bounds_90_h[-1, 1])
             l95, u95 = float(bounds_95_h[-1, 0]), float(bounds_95_h[-1, 1])
             
+            # Apply fundamental-driven scaling to conformal bounds
+            if conformal_multiplier != 1.0:
+                half_width_90 = (u90 - l90) * conformal_multiplier / 2.0
+                l90 = pred_val - half_width_90
+                u90 = pred_val + half_width_90
+                
+                half_width_95 = (u95 - l95) * conformal_multiplier / 2.0
+                l95 = pred_val - half_width_95
+                u95 = pred_val + half_width_95
+            
             # Enforce non-negative bounds
-            l90 = max(0.0, pred_val - (pred_val - l90))
-            u90 = pred_val + (u90 - pred_val)
-            l95 = max(0.0, pred_val - (pred_val - l95))
-            u95 = pred_val + (u95 - pred_val)
+            l90 = max(0.0, l90)
+            l95 = max(0.0, l95)
             
             future_date = future_dates[h - 1] if (h - 1) < len(future_dates) else (last_date + timedelta(days=h)).date()
             
@@ -551,6 +614,8 @@ def predict_forecast_envelope(
             "ticker": ticker,
             "current_regime": current_regime,
             "regime_label": "High Volatility / Bearish" if current_regime == 1 else "Low Volatility / Bullish",
+            "fundamental_regime": fundamental_regime,
+            "fundamentals": fundamentals,
             "horizon_steps": horizon_steps,
             "ensemble_weights": ensemble_weights,
             "forecasts": forecast_records

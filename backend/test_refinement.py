@@ -212,6 +212,57 @@ class TestQuantitativeEngineRefinement(unittest.TestCase):
         self.assertTrue(isinstance(metrics["sharpe_ratio"], float))
         self.assertTrue(isinstance(metrics["max_drawdown"], float))
         self.assertTrue(isinstance(metrics["mape"], float))
+
+    def test_screener_fundamentals_scraping(self):
+        """
+        6. Test the Screener fundamentals scraping method and yfinance fallback.
+        """
+        from app.data_ingestion import ApexDataIngestor
+        ingestor = ApexDataIngestor()
+        
+        fundamentals = ingestor.scrape_screener_fundamentals("RELIANCE")
+        
+        required_keys = ["market_cap", "pe_ratio", "roce", "roe", "debt_to_equity", "dividend_yield", "book_value", "sales_growth", "source"]
+        for key in required_keys:
+            self.assertIn(key, fundamentals)
+            
+        self.assertTrue(isinstance(fundamentals["market_cap"], float))
+        self.assertTrue(isinstance(fundamentals["pe_ratio"], float))
+        self.assertTrue(isinstance(fundamentals["roe"], float))
+        self.assertTrue(isinstance(fundamentals["source"], str))
+
+    def test_ensemble_fundamental_regimes(self):
+        """
+        7. Test ensembling weights adjustment under different fundamental regimes.
+        """
+        ensemble = EnsembleForecaster(seq_len=15)
+        
+        # Scenario A: High Growth Quality (High ROE, High PE)
+        fund_growth = {"roe": 20.0, "pe_ratio": 25.0, "debt_to_equity": 0.2}
+        weights, conformal_mult, label = ensemble.calibrate_weights_with_fundamentals(fund_growth)
+        self.assertEqual(label, "💎 HIGH-GROWTH QUALITY")
+        self.assertEqual(conformal_mult, 0.95)
+        self.assertEqual(weights["tft"], 0.50)
+        
+        # Scenario B: High Leverage/Risk (High Debt-to-Equity)
+        fund_risk = {"roe": 5.0, "pe_ratio": 12.0, "debt_to_equity": 2.0}
+        weights, conformal_mult, label = ensemble.calibrate_weights_with_fundamentals(fund_risk)
+        self.assertEqual(label, "⚠️ HIGH LEVERAGE / RISK")
+        self.assertEqual(conformal_mult, 1.25)
+        self.assertEqual(weights["gbr"], 0.40)
+        
+        # Scenario C: Value/Defensive (Low PE, Low Debt-to-Equity)
+        fund_value = {"roe": 10.0, "pe_ratio": 8.0, "debt_to_equity": 0.1}
+        weights, conformal_mult, label = ensemble.calibrate_weights_with_fundamentals(fund_value)
+        self.assertEqual(label, "📈 VALUE / CYCLICAL")
+        self.assertEqual(conformal_mult, 1.0)
+        self.assertEqual(weights["ridge"], 0.35)
+        
+        # Fit with fundamentals
+        ensemble.fit(self.X, self.y, fundamentals=fund_growth)
+        preds = ensemble.predict(self.X[-20:])
+        self.assertEqual(preds["regime_label"], "💎 HIGH-GROWTH QUALITY")
+        self.assertEqual(preds["conformal_multiplier"], 0.95)
         
 if __name__ == '__main__':
     unittest.main()

@@ -332,5 +332,121 @@ class ApexDataIngestor:
         
         return aligned_df
 
+    def scrape_screener_fundamentals(self, ticker: str) -> Dict[str, Any]:
+        """
+        Headless scraping of fundamental metrics from Screener.in for the target equity.
+        Falls back to Yahoo Finance fundamentals if blocked or unavailable.
+        """
+        clean_ticker = ticker.upper().replace(".NS", "").replace(".BO", "").strip()
+        print(f"Fetching fundamentals for {clean_ticker}...")
+        
+        # Standard default dictionary
+        fundamentals = {
+            "market_cap": 0.0,
+            "pe_ratio": 0.0,
+            "roce": 0.0,
+            "roe": 0.0,
+            "debt_to_equity": 0.0,
+            "dividend_yield": 0.0,
+            "book_value": 0.0,
+            "sales_growth": 0.0,
+            "source": "None"
+        }
+        
+        # Method A: Try Screener.in Scraper
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        }
+        
+        try:
+            url = f"https://www.screener.in/company/{clean_ticker}/consolidated/"
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200:
+                url = f"https://www.screener.in/company/{clean_ticker}/"
+                res = requests.get(url, headers=headers, timeout=5)
+                
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                ratios_sec = soup.find(id="top")
+                if ratios_sec:
+                    items = ratios_sec.find_all("li", class_="flex")
+                    found_any = False
+                    for item in items:
+                        name_span = item.find("span", class_="name")
+                        val_span = item.find("span", class_="number")
+                        if name_span and val_span:
+                            label = name_span.text.strip().lower()
+                            val_str = val_span.text.strip().replace("₹", "").replace("%", "").replace(",", "").strip()
+                            try:
+                                val_f = float(val_str)
+                            except ValueError:
+                                clean_val = "".join([c for c in val_str if c.isdigit() or c == "."])
+                                try:
+                                    val_f = float(clean_val) if clean_val else 0.0
+                                except ValueError:
+                                    val_f = 0.0
+                                    
+                            if "market cap" in label:
+                                fundamentals["market_cap"] = val_f
+                                found_any = True
+                            elif "stock p/e" in label or "p/e" in label:
+                                fundamentals["pe_ratio"] = val_f
+                                found_any = True
+                            elif "roce" in label:
+                                fundamentals["roce"] = val_f
+                                found_any = True
+                            elif "roe" in label:
+                                fundamentals["roe"] = val_f
+                                found_any = True
+                            elif "debt to equity" in label:
+                                fundamentals["debt_to_equity"] = val_f
+                                found_any = True
+                            elif "dividend yield" in label:
+                                fundamentals["dividend_yield"] = val_f
+                                found_any = True
+                            elif "book value" in label:
+                                fundamentals["book_value"] = val_f
+                                found_any = True
+                            elif "sales growth" in label:
+                                fundamentals["sales_growth"] = val_f
+                                found_any = True
+                                
+                    if found_any:
+                        fundamentals["source"] = "Screener.in"
+                        print(f"Successfully scraped fundamentals from Screener.in for {clean_ticker}: PE={fundamentals['pe_ratio']}, ROE={fundamentals['roe']}, D/E={fundamentals['debt_to_equity']}")
+                        return fundamentals
+        except Exception as e:
+            print(f"Screener.in scraping failed: {e}. Trying Yahoo Finance fallback.")
+
+        # Method B: Fallback to Yahoo Finance (stable fallback)
+        try:
+            yf_ticker = f"{clean_ticker}.NS"
+            stock = yf.Ticker(yf_ticker)
+            info = stock.info
+            if info:
+                fundamentals["market_cap"] = float(info.get("marketCap", 0)) / 10000000.0 # Convert to Crores
+                fundamentals["pe_ratio"] = float(info.get("trailingPE", info.get("forwardPE", 0.0)))
+                fundamentals["roe"] = float(info.get("returnOnEquity", 0.0)) * 100.0
+                fundamentals["roce"] = float(info.get("returnOnAssets", 0.0)) * 150.0 # ROA * 1.5 proxy for ROCE
+                if fundamentals["roce"] == 0.0 and fundamentals["roe"] > 0:
+                    fundamentals["roce"] = fundamentals["roe"] * 1.1 # proxy
+                d_e = info.get("debtToEquity", 0.0)
+                if d_e > 10.0:
+                    fundamentals["debt_to_equity"] = float(d_e) / 100.0
+                else:
+                    fundamentals["debt_to_equity"] = float(d_e)
+                fundamentals["dividend_yield"] = float(info.get("dividendYield", 0.0)) * 100.0
+                fundamentals["book_value"] = float(info.get("bookValue", 0.0))
+                fundamentals["sales_growth"] = float(info.get("revenueGrowth", 0.0)) * 100.0
+                fundamentals["source"] = "Yahoo Finance"
+                print(f"Retrieved fundamentals from Yahoo Finance fallback for {clean_ticker}: PE={fundamentals['pe_ratio']}, ROE={fundamentals['roe']}, D/E={fundamentals['debt_to_equity']}")
+                return fundamentals
+        except Exception as e:
+            print(f"Yahoo Finance fallback fundamentals fetch failed: {e}")
+            
+        return fundamentals
+
 # Singleton instance
 apex_ingestor = ApexDataIngestor()
+

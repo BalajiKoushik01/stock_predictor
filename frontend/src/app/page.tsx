@@ -87,6 +87,10 @@ export default function Dashboard() {
   const [macroStatus, setMacroStatus] = useState<string | null>(null);
   const [isIpoData, setIsIpoData] = useState(false);
 
+  // Fundamental metrics state
+  const [fundamentals, setFundamentals] = useState<any>(null);
+  const [fundamentalRegime, setFundamentalRegime] = useState<string>('⚖️ STANDARD COMPOSITE');
+
   // Benchmarking and Ensemble state
   const [benchmark, setBenchmark] = useState<{ beta: number; alpha_annualized: number; correlation: number } | null>(null);
   const [ensembleWeights, setEnsembleWeights] = useState<{ tft: number; ridge: number; gbr: number; hw: number } | null>(null);
@@ -272,6 +276,10 @@ export default function Dashboard() {
       if (pipelineResult.benchmark) {
         setBenchmark(pipelineResult.benchmark);
       }
+
+      if (pipelineResult.fundamentals) {
+        setFundamentals(pipelineResult.fundamentals);
+      }
       
       // Use the preview data from pipeline response directly — no extra DB call needed
       await fetchAlignedData(resolvedTicker, pipelineResult.preview || []);
@@ -301,6 +309,13 @@ export default function Dashboard() {
       
       if (predictResult.ensemble_weights) {
         setEnsembleWeights(predictResult.ensemble_weights);
+      }
+
+      if (predictResult.fundamentals) {
+        setFundamentals(predictResult.fundamentals);
+      }
+      if (predictResult.fundamental_regime) {
+        setFundamentalRegime(predictResult.fundamental_regime);
       }
       
       setMacroStatus('Multi-Model Ensemble forecast path mapped with inverse-accuracy weights.');
@@ -361,6 +376,8 @@ export default function Dashboard() {
       setTicker(customTicker);
       setSearchQuery(customTicker);
       setOptimalD(uploadResult.optimal_d);
+      setFundamentals(null);
+      setFundamentalRegime('⚖️ STANDARD COMPOSITE');
 
       // Instantly run forecasting and backtesting metrics on uploaded set!
       await fetchAlignedData(customTicker);
@@ -526,7 +543,7 @@ export default function Dashboard() {
       {/* Quantitative Methodology Framework */}
       <div style={{ display: 'flex', gap: '15px', background: 'rgba(0, 242, 254, 0.02)', border: '1px solid rgba(0, 242, 254, 0.1)', borderRadius: '12px', padding: '14px 20px', marginBottom: '25px', fontSize: '0.85rem', color: '#a3b2c5', lineHeight: '1.4' }}>
         <span style={{ fontWeight: '700', color: 'var(--accent-cyan)' }}>QUANTITATIVE METHODOLOGY FRAMEWORK:</span>
-        <span>This institutional forecasting engine implements Fractional Differencing (FFD) to secure stationary features while preserving memory, utilizes Empirical Mode Decomposition (EMD) for signal noise filtering, applies a Gaussian Hidden Markov Model (HMM) to classify market volatility regimes, and compiles a dynamic weighted ensemble (TFT Attention, Robust Ridge, GBR, Holt-Winters) with Conformal calibration (MAPIE) to generate confidence envelopes.</span>
+        <span>This institutional forecasting engine implements Fractional Differencing (FFD) to secure stationary features while preserving memory, utilizes Empirical Mode Decomposition (EMD) for signal noise filtering, applies a Gaussian Hidden Markov Model (HMM) to classify market volatility regimes, and compiles a dynamic weighted ensemble (TFT Attention, Robust Ridge, GBR, Holt-Winters) with Conformal calibration (MAPIE) to generate confidence envelopes. The ensembling weights and conformal prediction widths are dynamically calibrated based on the asset's fundamental regime (e.g. Growth, Value, Leverage) scraped from Screener.in/Yahoo Finance, blending long-term financial quality with short-term validation metrics.</span>
       </div>
 
       {error && (
@@ -662,6 +679,77 @@ export default function Dashboard() {
             </div>
           ) : (
             <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '15px' }}>Awaiting ensemble weight optimization...</div>
+          )}
+        </div>
+      </div>
+
+      {/* Institutional Fundamental Scorecard (Screener.in & Yahoo Finance) */}
+      <div className="kpi-row" style={{ marginTop: '0px', marginBottom: '20px' }}>
+        <div className="kpi-card" style={{ flex: 1, minWidth: '320px' }}>
+          <span className="kpi-label" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', fontWeight: '700', letterSpacing: '0.5px' }}>
+            <Layers size={15} color="var(--accent-cyan)" /> Institutional Fundamental Scorecard (Screener.in)
+          </span>
+          {fundamentals ? (
+            <div style={{ marginTop: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Fundamental Regime Calibration:</span>
+                <span style={{ 
+                  fontSize: '0.75rem', 
+                  fontWeight: '700', 
+                  color: fundamentalRegime.includes('QUALITY') ? 'var(--accent-cyan)' : fundamentalRegime.includes('VALUE') ? 'var(--accent-green)' : fundamentalRegime.includes('RISK') ? 'var(--accent-red)' : '#fff',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  border: `1px solid ${fundamentalRegime.includes('QUALITY') ? 'rgba(0, 242, 254, 0.2)' : fundamentalRegime.includes('VALUE') ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 23, 68, 0.2)'}`
+                }}>
+                  {fundamentalRegime}
+                </span>
+              </div>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginTop: '12px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>MARKET CAP (CR)</span>
+                  <span style={{ fontSize: '0.95rem', color: '#fff', fontWeight: '600', marginTop: '2px' }}>
+                    {fundamentals.market_cap ? `₹${fundamentals.market_cap.toLocaleString(undefined, {maximumFractionDigits: 0})} Cr` : '—'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>STOCK P/E RATIO</span>
+                  <span style={{ fontSize: '0.95rem', color: '#fff', fontWeight: '600', marginTop: '2px' }}>
+                    {fundamentals.pe_ratio ? fundamentals.pe_ratio.toFixed(2) : '—'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>ROCE / ROE</span>
+                  <span style={{ fontSize: '0.95rem', color: 'var(--accent-green)', fontWeight: '600', marginTop: '2px' }}>
+                    {fundamentals.roce ? `${fundamentals.roce.toFixed(1)}%` : '—'} / {fundamentals.roe ? `${fundamentals.roe.toFixed(1)}%` : '—'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>DEBT TO EQUITY</span>
+                  <span style={{ fontSize: '0.95rem', color: fundamentals.debt_to_equity >= 1.5 ? 'var(--accent-red)' : '#fff', fontWeight: '600', marginTop: '2px' }}>
+                    {fundamentals.debt_to_equity !== undefined ? fundamentals.debt_to_equity.toFixed(2) : '—'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>BOOK VALUE / DIV YIELD</span>
+                  <span style={{ fontSize: '0.95rem', color: '#fff', fontWeight: '600', marginTop: '2px' }}>
+                    ₹{fundamentals.book_value ? fundamentals.book_value.toFixed(1) : '—'} / {fundamentals.dividend_yield ? `${fundamentals.dividend_yield.toFixed(2)}%` : '—'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', background: 'rgba(255,255,255,0.02)', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.03)' }}>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>SALES GROWTH (3Y)</span>
+                  <span style={{ fontSize: '0.95rem', color: '#fff', fontWeight: '600', marginTop: '2px' }}>
+                    {fundamentals.sales_growth ? `${fundamentals.sales_growth.toFixed(1)}%` : '—'}
+                  </span>
+                </div>
+              </div>
+              <div style={{ fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '10px', textAlign: 'right' }}>
+                Source: {fundamentals.source} | Last updated: {fundamentals.updated_at ? fundamentals.updated_at.split('.')[0] : 'Never'}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '15px' }}>Awaiting fundamental analysis. Run the pipeline to scrape Screener.in...</div>
           )}
         </div>
       </div>
