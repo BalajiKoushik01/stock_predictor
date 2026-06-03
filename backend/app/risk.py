@@ -15,7 +15,7 @@ def run_conformal_forecasting(
     using a rolling residuals split-conformal approach.
     Uncertainty bands are calibrated directly for the forecast horizon.
     """
-    base_model = TFTAttentionRegressor(epochs=30, batch_size=16, lr=0.005)
+    base_model = TFTAttentionRegressor(epochs=5, batch_size=16, lr=0.005)
 
     try:
         n = len(train_features)
@@ -161,7 +161,7 @@ class WalkForwardBacktester:
             test_regimes = regimes[i : i + step_size]
 
             # Fit Ensemble Forecaster
-            ensemble = EnsembleForecaster(seq_len=15)
+            ensemble = EnsembleForecaster(seq_len=15, tft_epochs=3)
             try:
                 ensemble.fit(train_features, train_targets)
                 

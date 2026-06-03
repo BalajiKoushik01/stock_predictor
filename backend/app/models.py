@@ -499,9 +499,9 @@ class EnsembleForecaster:
     Fits models, evaluates out-of-fold MAPE, and dynamically yields predictions.
     Customizes ensembling weights and conformal envelopes using fundamental metrics.
     """
-    def __init__(self, seq_len: int = 15):
+    def __init__(self, seq_len: int = 15, tft_epochs: int = 25):
         self.seq_len = seq_len
-        self.tft = TFTAttentionRegressor(seq_len=seq_len, epochs=25)
+        self.tft = TFTAttentionRegressor(seq_len=seq_len, epochs=tft_epochs)
         self.ridge = RobustRidgeRegressor(seq_len=seq_len)
         self.gbr = RobustGBRegressor(seq_len=seq_len)
         self.hw = HoltWintersRegressor()

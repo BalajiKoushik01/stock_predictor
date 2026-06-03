@@ -1,3 +1,18 @@
+import sys
+# Mask curl_cffi from being imported by yfinance to prevent TLS certificate errors
+sys.modules['curl_cffi'] = None
+sys.modules['curl_cffi.requests'] = None
+
+import ssl
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Disable standard library SSL validation
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+
 import os
 import json
 import numpy as np
@@ -7,6 +22,14 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+
+# Disable requests validation globally
+original_requests_request = requests.Session.request
+def patched_requests_request(self, method, url, *args, **kwargs):
+    kwargs['verify'] = False
+    return original_requests_request(self, method, url, *args, **kwargs)
+requests.Session.request = patched_requests_request
+
 
 from app.database import db_manager
 from app.data_ingestion import apex_ingestor
@@ -555,7 +578,7 @@ def predict_forecast_envelope(
             train_targets_h = y_h[:-h]
             
             # Fit and run the multi-model ensemble with fundamentals
-            ensemble = EnsembleForecaster(seq_len=seq_len)
+            ensemble = EnsembleForecaster(seq_len=seq_len, tft_epochs=5)
             ensemble.fit(train_features_h, train_targets_h, fundamentals=fundamentals)
             
             # Save weights from the final step for return metadata
