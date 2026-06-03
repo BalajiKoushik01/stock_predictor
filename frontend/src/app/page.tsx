@@ -105,6 +105,69 @@ export default function Dashboard() {
   const [cointResult, setCointResult] = useState<any>(null);
   const [cointError, setCointError] = useState<string | null>(null);
 
+  // Background pipeline progress tracker log state
+  const [progressLog, setProgressLog] = useState<string>('');
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    let timer = 0;
+    
+    if (loading) {
+      const steps = [
+        "🔌 Establishing secure handshake with TradingView guest feeds...",
+        "📊 Downloading full historical OHLCV data...",
+        "🕸️ Scraping financial ratios from Screener.in with yfinance fallback...",
+        "🧬 Running Fractional Differencing (FFD) memory optimization...",
+        "🧮 Decomposing non-stationary price signals via EMD cycles...",
+        "🗄️ Persisting preprocessed registries in DuckDB cache database...",
+        "⏳ Compiling dataset parameters, almost ready..."
+      ];
+      setProgressLog(steps[0]);
+      interval = setInterval(() => {
+        timer += 1;
+        const idx = Math.min(steps.length - 1, Math.floor(timer / 1.5));
+        setProgressLog(steps[idx]);
+      }, 1000);
+    } else if (predicting) {
+      const steps = [
+        "🏋️ Calibrating PyTorch Temporal Fusion Transformer (TFT) attention weights...",
+        "🌲 Fitting Robust Gradient Boosting Regressor (GBR) decision trees...",
+        "📈 Estimating Linear Ridge trend structures...",
+        "🌊 Resolving Holt-Winters exponential trend projections...",
+        "💎 Detecting fundamental regime & adjusting prior weights...",
+        "🛡️ Running MAPIE conformal prediction residuals calibration...",
+        "🏁 Compiling final dynamic prediction ensembles..."
+      ];
+      setProgressLog(steps[0]);
+      interval = setInterval(() => {
+        timer += 1;
+        const idx = Math.min(steps.length - 1, Math.floor(timer / 2.0));
+        setProgressLog(steps[idx]);
+      }, 1000);
+    } else if (backtesting) {
+      const steps = [
+        "⏱️ Initializing out-of-sample Walk-Forward simulation...",
+        "⚙️ Executing rolling ensembling windows...",
+        "📊 Compiling cumulative strategy performance...",
+        "⚖️ Estimating risk metrics: Sharpe Ratio & Max Drawdown...",
+        "🎯 Measuring Directional Prediction Accuracy...",
+        "🏁 Finalizing optimizer diagnostics..."
+      ];
+      setProgressLog(steps[0]);
+      interval = setInterval(() => {
+        timer += 1;
+        const idx = Math.min(steps.length - 1, Math.floor(timer / 2.5));
+        setProgressLog(steps[idx]);
+      }, 1000);
+    } else {
+      setProgressLog('');
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [loading, predicting, backtesting]);
+
   const runCointegration = async () => {
     setCointLoading(true);
     setCointError(null);
@@ -852,9 +915,14 @@ export default function Dashboard() {
 
           <div className="chart-container-wrapper">
             {loading || predicting || uploading ? (
-              <div className="overlay-message">
+              <div className="overlay-message" style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
                 <div className="spinner"></div>
-                <span>Executing Mathematical Pipelines (PTAR Attention Networks & MAPIE Envelopes)...</span>
+                <span style={{ fontSize: '1rem', fontWeight: '700', color: 'var(--accent-cyan)' }}>
+                  {progressLog || "Executing Mathematical Pipelines..."}
+                </span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                  Please wait, this calibrates multi-model attention weights and dynamic risk margins on the fly.
+                </span>
               </div>
             ) : chartData.length > 0 ? (
               <ApexChart data={chartData} forecasts={forecasts} activeTab={activeTab} />
@@ -900,9 +968,11 @@ export default function Dashboard() {
                     <Cpu size={16} /> Backtest Performance <span>{horizon}D Horizon</span>
                   </div>
                   {backtesting ? (
-                    <div className="overlay-message" style={{ height: '140px' }}>
+                    <div className="overlay-message" style={{ height: '140px', padding: '10px', display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'center', justifyContent: 'center' }}>
                       <div className="spinner" style={{ width: '25px', height: '25px' }}></div>
-                      <span style={{ fontSize: '0.8rem' }}>Running Walk-Forward Optimization...</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', textAlign: 'center' }}>
+                        {progressLog || "Running Walk-Forward Optimization..."}
+                      </span>
                     </div>
                   ) : backtestStats ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '0.85rem' }}>
