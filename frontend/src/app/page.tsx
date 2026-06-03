@@ -96,7 +96,7 @@ export default function Dashboard() {
   const [ensembleWeights, setEnsembleWeights] = useState<{ tft: number; ridge: number; gbr: number; hw: number } | null>(null);
 
   // Advanced Institutional Workspace States
-  const [workspaceTab, setWorkspaceTab] = useState<'cointegration' | 'var' | 'datatable'>('cointegration');
+  const [workspaceTab, setWorkspaceTab] = useState<'cointegration' | 'var' | 'datatable' | 'fundamental_analytics'>('cointegration');
   const [sidebarTab, setSidebarTab] = useState<'backtest' | 'anomalies'>('backtest');
 
   // Cointegration Workspace
@@ -1168,6 +1168,13 @@ export default function Dashboard() {
             >
               FEATURE REGISTRY TABLE
             </button>
+            <button 
+              className={`tab-btn ${workspaceTab === 'fundamental_analytics' ? 'active' : ''}`}
+              onClick={() => setWorkspaceTab('fundamental_analytics')}
+              title="Inspect fundamental calibration, ROCE/ROE gauges, and ensembling models justification"
+            >
+              FUNDAMENTAL ANALYTICS
+            </button>
           </div>
         </h2>
 
@@ -1375,6 +1382,160 @@ export default function Dashboard() {
                   No historical features loaded. Please select a valid ticker or upload a custom CSV/XLSX.
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Tab 4: Fundamental Analytics and Gauge Visualizations */}
+        {workspaceTab === 'fundamental_analytics' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px', marginBottom: '20px' }}>
+              {/* Left Column: Financial Health Gauges */}
+              <div style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '1.2rem' }}>
+                <div style={{ fontSize: '0.95rem', fontWeight: '600', color: 'var(--accent-cyan)', borderBottom: '1px solid rgba(255,255,255,0.04)', paddingBottom: '8px', marginBottom: '16px' }}>
+                  Institutional Quality Gauges ({ticker || 'No Ticker Loaded'})
+                </div>
+                {fundamentals ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                    {/* ROCE / ROE Performance Bar */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '6px' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Return on Equity (ROE)</span>
+                        <span style={{ fontWeight: '700', color: fundamentals.roe >= 15 ? 'var(--accent-green)' : '#fff' }}>
+                          {fundamentals.roe ? `${fundamentals.roe.toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+                      <div style={{ height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+                        <div style={{ 
+                          width: `${Math.min(100, Math.max(0, (fundamentals.roe ?? 0) * 3))}%`, 
+                          background: (fundamentals.roe ?? 0) >= 15 ? 'var(--accent-green)' : 'var(--accent-cyan)',
+                          height: '100%',
+                          borderRadius: '4px'
+                        }} />
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        <span>0%</span>
+                        <span>15% (Quality Threshold)</span>
+                        <span>30%+</span>
+                      </div>
+                    </div>
+
+                    {/* Debt to Equity Leverage Gauge */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '6px' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Debt to Equity Leverage Ratio</span>
+                        <span style={{ fontWeight: '700', color: (fundamentals.debt_to_equity ?? 0) > 1.5 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                          {fundamentals.debt_to_equity !== undefined ? fundamentals.debt_to_equity.toFixed(2) : '—'}
+                        </span>
+                      </div>
+                      <div style={{ height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+                        <div style={{ 
+                          width: `${Math.min(100, Math.max(0, (fundamentals.debt_to_equity ?? 0) * 50))}%`, 
+                          background: (fundamentals.debt_to_equity ?? 0) > 1.5 ? 'var(--accent-red)' : (fundamentals.debt_to_equity ?? 0) > 0.8 ? '#ffeb3b' : 'var(--accent-green)',
+                          height: '100%',
+                          borderRadius: '4px'
+                        }} />
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        <span>0.0 (Unleveraged)</span>
+                        <span>1.0 (Moderate)</span>
+                        <span>2.0+ (High Risk)</span>
+                      </div>
+                    </div>
+
+                    {/* Sales Growth Growth Engine */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '6px' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Compound 3-Year Sales Growth</span>
+                        <span style={{ fontWeight: '700', color: (fundamentals.sales_growth ?? 0) >= 12 ? 'var(--accent-cyan)' : '#fff' }}>
+                          {fundamentals.sales_growth ? `${fundamentals.sales_growth.toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+                      <div style={{ height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+                        <div style={{ 
+                          width: `${Math.min(100, Math.max(0, (fundamentals.sales_growth ?? 0) * 3))}%`, 
+                          background: (fundamentals.sales_growth ?? 0) >= 12 ? 'var(--accent-cyan)' : '#a3b2c5',
+                          height: '100%',
+                          borderRadius: '4px'
+                        }} />
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        <span>0%</span>
+                        <span>12% (Growth Baseline)</span>
+                        <span>30%+</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                    Run the pipeline to load and analyze fundamental metrics.
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column: Model Allocation Weights Justification */}
+              <div style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '1.2rem' }}>
+                <div style={{ fontSize: '0.95rem', fontWeight: '600', color: 'var(--accent-cyan)', borderBottom: '1px solid rgba(255,255,255,0.04)', paddingBottom: '8px', marginBottom: '16px' }}>
+                  Model Allocation Rationale & Regimes
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '0.85rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Selected Regime:</span>
+                    <span style={{ fontWeight: '800', color: 'var(--accent-cyan)' }}>{fundamentalRegime}</span>
+                  </div>
+
+                  <div style={{ color: 'var(--text-secondary)', lineHeight: '1.4', fontSize: '0.8rem', background: 'rgba(0, 242, 254, 0.02)', border: '1px solid rgba(0, 242, 254, 0.1)', padding: '10px', borderRadius: '6px' }}>
+                    {fundamentalRegime.includes('QUALITY') && (
+                      <span><strong>💎 Growth Quality Regime active:</strong> Heavy allocation (50%) is automatically mapped to the Temporal Fusion Transformer (TFT) self-attention networks. Since the stock exhibits superior capital efficiency (high ROE/ROCE) and safe leverage levels, we compress the Conformal Risk bands by <strong>5% (0.95x multiplier)</strong> to reflect high forecasting certainty.</span>
+                    )}
+                    {fundamentalRegime.includes('RISK') && (
+                      <span><strong>⚠️ High Leverage/Risk Regime active:</strong> Weights are redirected to Robust Gradient Boosting Trees (40%) to handle non-linear market shocks. Due to high debt ratios or capital weakness, Conformal Uncertainty envelopes are expanded by <strong>25% (1.25x multiplier)</strong> to hedge against sudden credit or solvency shocks.</span>
+                    )}
+                    {fundamentalRegime.includes('VALUE') && (
+                      <span><strong>📈 Value/Cyclical Regime active:</strong> System redirects priority allocation to linear and historical trend models: Robust Ridge (35%) and Holt-Winters (30%). These assets tend to exhibit long-term mean reversion, which linear regressors capture with optimal bias/variance tradeoffs.</span>
+                    )}
+                    {fundamentalRegime.includes('STANDARD') && (
+                      <span><strong>⚖️ Standard Composite Regime active:</strong> Allocations are calibrated using out-of-fold validation MAPE performance (40%) combined with a balanced prior (60%), keeping a standard 1.0x conformal interval width.</span>
+                    )}
+                  </div>
+
+                  {ensembleWeights && (
+                    <div style={{ marginTop: '4px' }}>
+                      <span style={{ fontSize: '0.75rem', fontWeight: '700', color: '#fff', display: 'block', marginBottom: '8px' }}>Active Model Weights breakdown:</span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ width: '60px', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>TFT (Attn):</span>
+                          <div style={{ flex: 1, height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${ensembleWeights.tft * 100}%`, background: 'var(--accent-cyan)', height: '100%' }} />
+                          </div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: '600', width: '35px', textAlign: 'right' }}>{(ensembleWeights.tft * 100).toFixed(0)}%</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ width: '60px', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Ridge (Lin):</span>
+                          <div style={{ flex: 1, height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${ensembleWeights.ridge * 100}%`, background: '#ffeb3b', height: '100%' }} />
+                          </div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: '600', width: '35px', textAlign: 'right' }}>{(ensembleWeights.ridge * 100).toFixed(0)}%</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ width: '60px', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>GBR (Tree):</span>
+                          <div style={{ flex: 1, height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${ensembleWeights.gbr * 100}%`, background: '#00e676', height: '100%' }} />
+                          </div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: '600', width: '35px', textAlign: 'right' }}>{(ensembleWeights.gbr * 100).toFixed(0)}%</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ width: '60px', fontSize: '0.7rem', color: 'var(--text-secondary)' }}>HW (Trend):</span>
+                          <div style={{ flex: 1, height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${ensembleWeights.hw * 100}%`, background: '#ff4081', height: '100%' }} />
+                          </div>
+                          <span style={{ fontSize: '0.75rem', fontWeight: '600', width: '35px', textAlign: 'right' }}>{(ensembleWeights.hw * 100).toFixed(0)}%</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )}
