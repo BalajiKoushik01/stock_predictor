@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple
 
 from app.models import TFTAttentionRegressor
 
@@ -10,6 +10,7 @@ def run_conformal_forecasting(
     test_features: np.ndarray,
     horizon_steps: int = 10
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    _ = horizon_steps  # reserved parameter for api signature compatibility
     """
     Fits Temporal Attention model and computes calibrated conformal prediction intervals
     using a rolling residuals split-conformal approach.
@@ -155,8 +156,6 @@ class WalkForwardBacktester:
             train_features = X[:i]
             train_targets = y[:i]
             
-            test_features = X[i : i + step_size]
-            test_prices = close_prices[i : i + step_size]
             actual_targets = y[i : i + step_size]
             test_regimes = regimes[i : i + step_size]
 
@@ -208,7 +207,7 @@ class WalkForwardBacktester:
                         signals[curr_idx] = 1.0
                     else:
                         signals[curr_idx] = 0.0
-            except Exception as e:
+            except Exception:
                 # Catch training failures gracefully
                 continue
 

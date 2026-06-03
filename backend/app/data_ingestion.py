@@ -78,7 +78,7 @@ def get_finbert_sentiment(text: str) -> float:
         # Calculate continuous score: positive weight = 1.0, negative = -1.0, neutral = 0.0
         score = float(probs[0] - probs[1])
         return score
-    except Exception as e:
+    except Exception:
         # Lexicon Fallback (Highly calibrated for financial terms to guarantee zero runtime crashes)
         # Standard positive/negative financial keywords
         pos_words = {"surge", "profit", "growth", "bullish", "jump", "dividend", "upbeat", "boost", "outperform", "buy", "gain", "higher", "positive"}
