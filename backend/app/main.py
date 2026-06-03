@@ -50,7 +50,7 @@ from app.utils import get_nse_trading_days
 # Load local NSE stock database for instant autocomplete
 _NSE_DB_PATH = os.path.join(os.path.dirname(__file__), 'nse_stocks.json')
 try:
-    with open(_NSE_DB_PATH, 'r') as _f:
+    with open(_NSE_DB_PATH, 'r', encoding='utf-8') as _f:
         NSE_STOCKS: list = json.load(_f)
 except Exception:
     NSE_STOCKS = []
@@ -72,9 +72,10 @@ app.add_middleware(
 
 @app.get("/health")
 def health_check():
+    from datetime import timezone
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "database_connected": db_manager.db_path is not None
     }
 
