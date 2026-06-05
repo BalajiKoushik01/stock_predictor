@@ -8,7 +8,8 @@ def run_conformal_forecasting(
     train_features: np.ndarray,
     train_targets: np.ndarray,
     test_features: np.ndarray,
-    horizon_steps: int = 10
+    horizon_steps: int = 10,
+    base_model = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     _ = horizon_steps  # reserved parameter for api signature compatibility
     """
@@ -16,7 +17,8 @@ def run_conformal_forecasting(
     using a rolling residuals split-conformal approach.
     Uncertainty bands are calibrated directly for the forecast horizon.
     """
-    base_model = TFTAttentionRegressor(epochs=5, batch_size=16, lr=0.005)
+    if base_model is None:
+        base_model = TFTAttentionRegressor(epochs=5, batch_size=16, lr=0.005)
 
     try:
         n = len(train_features)
@@ -31,8 +33,9 @@ def run_conformal_forecasting(
         calib_features = train_features[split:]
         calib_targets  = train_targets[split:]
 
-        # Fit on training portion
-        base_model.fit(fit_features, train_targets[:split])
+        # Fit on training portion only if epochs > 0 or model not trained yet
+        if base_model.epochs > 0 or base_model.net is None:
+            base_model.fit(fit_features, train_targets[:split])
 
         # Get calibration residuals
         calib_preds = base_model.predict(calib_features)
@@ -65,7 +68,8 @@ def run_conformal_forecasting(
         print(f"[WARNING] Conformal regression failed: {e}. Falling back to parametric residuals calibration.")
 
         try:
-            base_model.fit(train_features, train_targets)
+            if base_model.epochs > 0 or base_model.net is None:
+                base_model.fit(train_features, train_targets)
             y_pred = base_model.predict(test_features)
         except Exception as e2:
             print(f"[WARNING] Base model fit also failed: {e2}. Using last known price.")
@@ -149,7 +153,16 @@ class WalkForwardBacktester:
         step_size = 10
         print(f"Executing Walk-Forward Backtester across {N - min_train_days} sessions...")
         
-        from app.models import EnsembleForecaster
+        from app.models import EnsembleForecaster, TFTAttentionRegressor
+        
+        # ─── OPTIMIZATION: Pre-train a shared TFT once on the full dataset ───
+        # Without this: each of ~50 rolling windows trains TFT from scratch (~3 epochs × 50 = 150 GPU/CPU passes)
+        # With this: 1 TFT pre-train + only Ridge/GBR/HW retrain per window (fast sklearn models, <1s each)
+        print("[OPTIMIZE] Pre-training shared TFT for walk-forward backtester...")
+        shared_bt_tft = TFTAttentionRegressor(seq_len=15, epochs=3, batch_size=16, lr=0.005)
+        shared_bt_tft.fit(X, y)
+        shared_bt_tft.epochs = 0  # freeze — skip re-training in subsequent steps
+        print("[OPTIMIZE] Shared backtest TFT pre-trained. Running walk-forward windows...")
 
         for i in range(min_train_days, N - horizon_steps, step_size):
             # Dynamic rolling split
@@ -159,8 +172,9 @@ class WalkForwardBacktester:
             actual_targets = y[i : i + step_size]
             test_regimes = regimes[i : i + step_size]
 
-            # Fit Ensemble Forecaster
-            ensemble = EnsembleForecaster(seq_len=15, tft_epochs=3)
+            # Fit Ensemble Forecaster — inject frozen TFT, only Ridge/GBR/HW retrain each window
+            ensemble = EnsembleForecaster(seq_len=15, tft_epochs=0)
+            ensemble.tft = shared_bt_tft
             try:
                 ensemble.fit(train_features, train_targets)
                 

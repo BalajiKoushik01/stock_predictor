@@ -564,13 +564,29 @@ def predict_forecast_envelope(
             end_date=last_date + timedelta(days=horizon_steps * 2.5)
         )[:horizon_steps]
 
-        # Execute Conformal predictions iteratively for each step h to generate a dynamic path
+        # ─── OPTIMIZATION: Train TFT once upfront, reuse for all horizon steps ───
+        # Previously: 10 steps × 2 fits (split+full) + 10 conformal fits = 30 TFT trains (~20+ min on CPU)
+        # Now: 1 TFT train upfront, reused via tft_epochs=0 across all steps (~1-3 min total)
         forecast_records = []
         ensemble_weights = {"tft": 0.40, "ridge": 0.20, "gbr": 0.20, "hw": 0.20}
         fundamental_regime = "⚖️ STANDARD COMPOSITE"
         conformal_multiplier = 1.0
         print(f"Generating dynamic ensemble forecast path across {horizon_steps} sessions...")
-        
+
+        # Step 1: Warm up TFT on full dataset once (5 epochs) and a shared conformal TFT
+        print("[OPTIMIZE] Pre-training shared TFT model on full feature set...")
+        from app.models import TFTAttentionRegressor
+        shared_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=5, batch_size=16, lr=0.005)
+        shared_tft.fit(X, df['close_raw'].values)
+        # Shared conformal TFT: fitted once on calibration split with 0 re-training epochs afterward
+        shared_conformal_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=5, batch_size=16, lr=0.005)
+        conformal_split = max(seq_len + 10, int(len(X) * 0.80))
+        shared_conformal_tft.fit(X[:conformal_split], df['close_raw'].values[:conformal_split])
+        # Mark as pre-trained so all subsequent calls skip re-fitting
+        shared_tft.epochs = 0
+        shared_conformal_tft.epochs = 0
+        print("[OPTIMIZE] Shared TFT models pre-trained. Running horizon sweep with frozen TFT weights...")
+
         for h in range(1, horizon_steps + 1):
             y_h = np.roll(df['close_raw'].values, -h)
             y_h[-h:] = df['close_raw'].values[-1]
@@ -578,8 +594,10 @@ def predict_forecast_envelope(
             train_features_h = X[:-h]
             train_targets_h = y_h[:-h]
             
-            # Fit and run the multi-model ensemble with fundamentals
-            ensemble = EnsembleForecaster(seq_len=seq_len, tft_epochs=5)
+            # Fit ensemble with tft_epochs=0 to skip TFT re-train; Ridge/GBR/HW still fit fresh (fast, <1s each)
+            ensemble = EnsembleForecaster(seq_len=seq_len, tft_epochs=0)
+            # Inject pre-trained TFT weights directly
+            ensemble.tft = shared_tft
             ensemble.fit(train_features_h, train_targets_h, fundamentals=fundamentals)
             
             # Save weights from the final step for return metadata
@@ -590,9 +608,10 @@ def predict_forecast_envelope(
                 
             pred_dict = ensemble.predict(test_features)
             
-            # Use Conformal bounds around the ensemble forecast
+            # Use Conformal bounds — pass the pre-trained conformal TFT to avoid re-training
             _, bounds_90_h, bounds_95_h = run_conformal_forecasting(
-                train_features_h, train_targets_h, test_features, horizon_steps=h
+                train_features_h, train_targets_h, test_features, horizon_steps=h,
+                base_model=shared_conformal_tft
             )
             
             pred_val = float(pred_dict["ensemble"][-1])

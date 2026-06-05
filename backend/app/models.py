@@ -553,7 +553,8 @@ class EnsembleForecaster:
         X_val, y_val = X[split:], y[split:]
         
         # Fit models on training split
-        self.tft.fit(X_train, y_train)
+        if self.tft.epochs > 0 or self.tft.net is None:
+            self.tft.fit(X_train, y_train)
         self.ridge.fit(X_train, y_train)
         self.gbr.fit(X_train, y_train)
         self.hw.fit(X_train, y_train)
@@ -610,7 +611,8 @@ class EnsembleForecaster:
             self.weights = prior_weights
             
         # Fit on whole dataset to prepare for final forecast
-        self.tft.fit(X, y)
+        if self.tft.epochs > 0 or self.tft.net is None:
+            self.tft.fit(X, y)
         self.ridge.fit(X, y)
         self.gbr.fit(X, y)
         self.hw.fit(X, y)
