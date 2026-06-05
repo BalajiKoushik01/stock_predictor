@@ -5,7 +5,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from hmmlearn.hmm import GaussianHMM
 from sklearn.base import BaseEstimator, RegressorMixin
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Callable, Optional
+import threading
 
 # Optimize CPU: Limit PyTorch CPU threads to prevent 100% host CPU lockup
 try:
@@ -13,6 +14,26 @@ try:
     print("[CPU OPTIMIZED] PyTorch CPU thread allocation limited to 2 to secure system stability.")
 except Exception as e:
     print(f"Could not throttle PyTorch CPU threads: {e}")
+
+# ─── Global thread-safe training progress state ───
+# Written by model training callbacks; read by /api/pipeline/progress polling endpoint
+_progress_lock = threading.Lock()
+training_state: dict = {
+    "phase": "idle",           # e.g. 'tft_pretrain', 'horizon_1_of_10', 'backtest_tft', 'ridge', 'gbr'
+    "model": "",               # Model name being trained
+    "epoch": 0,                # Current epoch (1-indexed)
+    "total_epochs": 0,         # Total epochs for this model
+    "loss": 0.0,               # Last batch loss
+    "horizon_step": 0,         # Current horizon h (1–N)
+    "horizon_total": 0,        # Total horizon steps
+    "step_label": "",          # Human-readable progress label
+    "pct": 0.0,                # Overall progress 0.0–100.0
+}
+
+def update_training_state(**kwargs):
+    """Thread-safe update of global training_state."""
+    with _progress_lock:
+        training_state.update(kwargs)
 
 class RegimeDetector:
     """
@@ -193,7 +214,12 @@ class TFTAttentionRegressor(BaseEstimator, RegressorMixin):
                 
         return np.array(X_seq), np.array(y_seq) if y is not None else None
 
-    def fit(self, X: Union[np.ndarray, pd.DataFrame], y: Union[np.ndarray, pd.Series]) -> 'TFTAttentionRegressor':
+    def fit(
+        self,
+        X: Union[np.ndarray, pd.DataFrame],
+        y: Union[np.ndarray, pd.Series],
+        progress_callback: Optional[Callable[[int, int, float], None]] = None
+    ) -> 'TFTAttentionRegressor':
         from sklearn.preprocessing import StandardScaler
         # Standardize inputs
         if isinstance(X, pd.DataFrame):
@@ -229,18 +255,25 @@ class TFTAttentionRegressor(BaseEstimator, RegressorMixin):
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=1e-4)
 
-        # Training loop
+        # Training loop — fires progress_callback(epoch, total_epochs, loss) each epoch
         self.net.train()
         for epoch in range(self.epochs):
+            epoch_loss = 0.0
+            batch_count = 0
             for batch_x, batch_y in loader:
                 batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
-                
                 optimizer.zero_grad()
                 pred = self.net(batch_x)
                 loss = criterion(pred, batch_y)
                 loss.backward()
                 optimizer.step()
-                
+                epoch_loss += loss.item()
+                batch_count += 1
+            avg_loss = epoch_loss / max(batch_count, 1)
+            # Fire callback if provided — used to update global progress state for polling
+            if progress_callback is not None:
+                progress_callback(epoch + 1, self.epochs, avg_loss)
+
         return self
 
     def predict(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:

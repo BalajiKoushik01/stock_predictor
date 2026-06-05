@@ -43,7 +43,7 @@ from app.math_module import (
     calculate_macd,
     calculate_index_metrics
 )
-from app.models import RegimeDetector, EnsembleForecaster
+from app.models import RegimeDetector, EnsembleForecaster, training_state, update_training_state
 from app.risk import run_conformal_forecasting, apex_backtester
 from app.utils import get_nse_trading_days
 
@@ -78,6 +78,16 @@ def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "database_connected": db_manager.db_path is not None
     }
+
+@app.get("/api/pipeline/progress")
+def get_training_progress():
+    """
+    Lightweight polling endpoint — returns the current real-time training state.
+    Called every second by the frontend to display live epoch/loss/phase progress.
+    """
+    import copy
+    from app.models import training_state as ts
+    return copy.deepcopy(ts)
 
 @app.get("/api/stocks/search")
 def local_stock_search(q: str = Query(..., description="Stock name or symbol prefix")):
@@ -573,15 +583,54 @@ def predict_forecast_envelope(
         conformal_multiplier = 1.0
         print(f"Generating dynamic ensemble forecast path across {horizon_steps} sessions...")
 
-        # Step 1: Warm up TFT on full dataset once (5 epochs) and a shared conformal TFT
+        # Step 1: Warm up shared forecast TFT with live progress tracking
         print("[OPTIMIZE] Pre-training shared TFT model on full feature set...")
         from app.models import TFTAttentionRegressor
-        shared_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=5, batch_size=16, lr=0.005)
-        shared_tft.fit(X, df['close_raw'].values)
-        # Shared conformal TFT: fitted once on calibration split with 0 re-training epochs afterward
-        shared_conformal_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=5, batch_size=16, lr=0.005)
+        TFT_EPOCHS = 5
+        total_phases = 2 + horizon_steps  # 1 main TFT + 1 conformal TFT + N horizon steps
+
+        update_training_state(
+            phase="tft_pretrain",
+            model="TFT (Temporal Fusion Transformer)",
+            epoch=0, total_epochs=TFT_EPOCHS,
+            loss=0.0,
+            horizon_step=0, horizon_total=horizon_steps,
+            step_label=f"[1/{total_phases}] Pre-training TFT on full price history ({len(X)} sessions)...",
+            pct=0.0
+        )
+
+        def tft_main_cb(ep, total, loss):
+            pct = round((ep / total) * (1.0 / total_phases) * 100.0, 1)
+            update_training_state(epoch=ep, total_epochs=total, loss=round(loss, 6),
+                                  step_label=f"[1/{total_phases}] TFT Epoch {ep}/{total}  —  Loss: {loss:.6f}",
+                                  pct=pct)
+            print(f"  TFT Pretrain Epoch [{ep}/{total}]  Loss: {loss:.6f}")
+
+        shared_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=TFT_EPOCHS, batch_size=16, lr=0.005)
+        shared_tft.fit(X, df['close_raw'].values, progress_callback=tft_main_cb)
+
+        # Step 2: Train shared conformal TFT on calibration split
         conformal_split = max(seq_len + 10, int(len(X) * 0.80))
-        shared_conformal_tft.fit(X[:conformal_split], df['close_raw'].values[:conformal_split])
+        update_training_state(
+            phase="tft_conformal",
+            model="TFT (Conformal Calibration)",
+            epoch=0, total_epochs=TFT_EPOCHS,
+            loss=0.0,
+            step_label=f"[2/{total_phases}] Pre-training Conformal TFT on calibration split ({conformal_split} sessions)...",
+            pct=round(1.0 / total_phases * 100, 1)
+        )
+
+        def tft_conf_cb(ep, total, loss):
+            base_pct = 1.0 / total_phases
+            pct = round((base_pct + (ep / total) * (1.0 / total_phases)) * 100.0, 1)
+            update_training_state(epoch=ep, total_epochs=total, loss=round(loss, 6),
+                                  step_label=f"[2/{total_phases}] Conformal TFT Epoch {ep}/{total}  —  Loss: {loss:.6f}",
+                                  pct=pct)
+            print(f"  Conformal TFT Epoch [{ep}/{total}]  Loss: {loss:.6f}")
+
+        shared_conformal_tft = TFTAttentionRegressor(seq_len=seq_len, epochs=TFT_EPOCHS, batch_size=16, lr=0.005)
+        shared_conformal_tft.fit(X[:conformal_split], df['close_raw'].values[:conformal_split], progress_callback=tft_conf_cb)
+
         # Mark as pre-trained so all subsequent calls skip re-fitting
         shared_tft.epochs = 0
         shared_conformal_tft.epochs = 0
@@ -593,6 +642,18 @@ def predict_forecast_envelope(
             
             train_features_h = X[:-h]
             train_targets_h = y_h[:-h]
+
+            # Report which horizon step is being processed
+            phase_idx = 2 + h
+            base_pct = 2.0 / total_phases
+            update_training_state(
+                phase=f"horizon_{h}_of_{horizon_steps}",
+                model="Ridge / GBR / HW (Sklearn)",
+                epoch=0, total_epochs=1,
+                horizon_step=h, horizon_total=horizon_steps,
+                step_label=f"[{phase_idx}/{total_phases}] Horizon Step {h}/{horizon_steps} — Fitting Ridge, GBR, Holt-Winters...",
+                pct=round((base_pct + (h - 1) / horizon_steps * (1.0 - base_pct)) * 100.0, 1)
+            )
             
             # Fit ensemble with tft_epochs=0 to skip TFT re-train; Ridge/GBR/HW still fit fresh (fast, <1s each)
             ensemble = EnsembleForecaster(seq_len=seq_len, tft_epochs=0)
@@ -652,6 +713,10 @@ def predict_forecast_envelope(
                 "upper_95": u95
             })
 
+        update_training_state(
+            phase="done", model="", epoch=0, total_epochs=0, loss=0.0,
+            step_label="Forecast complete — assembling results...", pct=100.0
+        )
         return {
             "status": "success",
             "ticker": ticker,
@@ -664,6 +729,7 @@ def predict_forecast_envelope(
             "forecasts": forecast_records
         }
     except Exception as e:
+        update_training_state(phase="idle", model="", step_label="", pct=0.0, epoch=0, total_epochs=0)
         print(f"Prediction failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
