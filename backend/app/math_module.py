@@ -204,6 +204,58 @@ def calculate_macd(series: pd.Series) -> pd.Series:
     ema26 = series.ewm(span=26, adjust=False).mean()
     return ema12 - ema26
 
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Average True Range — measures volatility as the max of:
+    (H-L), |H-prev_close|, |L-prev_close|. Normalised by price.
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs()
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    # Normalise by price to make it scale-invariant (ATR%)
+    return (atr / close.replace(0.0, np.nan)).fillna(0.0)
+
+def calculate_bollinger_position(close: pd.Series, period: int = 20, std_dev: float = 2.0) -> pd.Series:
+    """
+    Bollinger Band %B: where the price sits within the bands.
+    0 = at lower band, 0.5 = at mid, 1.0 = at upper band.
+    Values outside [0,1] indicate breakouts.
+    """
+    rolling_mean = close.rolling(window=period).mean()
+    rolling_std  = close.rolling(window=period).std()
+    upper = rolling_mean + std_dev * rolling_std
+    lower = rolling_mean - std_dev * rolling_std
+    band_width = (upper - lower).replace(0.0, np.nan)
+    pct_b = (close - lower) / band_width
+    return pct_b.fillna(0.5)  # default to midband
+
+def calculate_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """
+    On-Balance Volume — cumulative volume directional flow.
+    Normalised by rolling std to make it comparable across tickers.
+    """
+    direction = np.sign(close.diff().fillna(0.0))
+    obv = (direction * volume).cumsum()
+    obv_std = obv.rolling(window=20).std().replace(0.0, 1.0)
+    return (obv / obv_std).fillna(0.0)
+
+def calculate_rolling_skew_kurt(returns: pd.Series, window: int = 20) -> tuple:
+    """
+    Rolling skewness and kurtosis of log returns.
+    These distributional shape features help models detect tail-risk regime shifts.
+    Returns: (skew_series, kurt_series)
+    """
+    skew = returns.rolling(window=window).skew().fillna(0.0)
+    kurt = returns.rolling(window=window).kurt().fillna(0.0)
+    # Clip extremes to avoid polluting the feature space
+    skew = skew.clip(-3.0, 3.0)
+    kurt = kurt.clip(-3.0, 10.0)
+    return skew, kurt
+
 def calculate_index_metrics(stock_prices: pd.Series, index_prices: pd.Series) -> dict:
     """
     Computes Beta, Jensen's Alpha, and Correlation relative to the benchmark Index.

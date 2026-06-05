@@ -110,59 +110,70 @@ class RegimeDetector:
 
 # PyTorch Network Architecture implementing Self-Attention (TFT Core Elements)
 class PyTorchTemporalAttentionNet(nn.Module):
-    def __init__(self, input_dim: int, seq_len: int, hidden_dim: int = 32, num_heads: int = 2):
+    def __init__(self, input_dim: int, seq_len: int, hidden_dim: int = 64, num_heads: int = 4):
         super().__init__()
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
 
-        # Input feature projection layer
-        self.feature_proj = nn.Linear(input_dim, hidden_dim)
+        # Input feature projection with batch normalisation
+        self.feature_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
 
-        # Multi-Head Attention layer mapping temporal dependencies
+        # Primary Multi-Head Attention layer
         self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim, 
-            num_heads=num_heads, 
-            batch_first=True
+            embed_dim=hidden_dim, num_heads=num_heads,
+            dropout=0.1, batch_first=True
+        )
+        # Second attention layer for deeper temporal context
+        self.attention2 = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads,
+            dropout=0.1, batch_first=True
         )
 
-        # Gated Temporal Linear Layer (analogous to TFT's Gated Residual Network)
+        # Gated Residual Network — deeper with two sub-layers
         self.gate_layer = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(), # SiLU is the continuous GELU/Gated activation
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(0.1)
         )
-        
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
-        # Output projection predicting single-step or multi-step price
+        self.layer_norm  = nn.LayerNorm(hidden_dim)
+        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+
+        # Output projection
         self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1)
+            nn.Linear(hidden_dim, 32),
+            nn.GELU(),
+            nn.Dropout(0.05),
+            nn.Linear(32, 1)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape: (batch_size, seq_len, input_dim)
         batch_size = x.size(0)
-        
-        # 1. Project features
-        proj_x = self.feature_proj(x) # (batch, seq, hidden)
 
-        # 2. Self-Attention over chronological sequence
+        # 1. Feature projection
+        proj_x = self.feature_proj(x)                             # (B, T, H)
+
+        # 2. First self-attention + residual
         attn_out, _ = self.attention(proj_x, proj_x, proj_x)
-        
-        # Residual connection
-        x_res = proj_x + attn_out
+        x_res = self.layer_norm(proj_x + attn_out)                # (B, T, H)
 
-        # 3. Gated Residual Network
-        gated_out = self.gate_layer(x_res)
-        x_norm = self.layer_norm(x_res + gated_out)
+        # 3. Second self-attention + residual
+        attn2_out, _ = self.attention2(x_res, x_res, x_res)
+        x_res2 = self.layer_norm2(x_res + attn2_out)             # (B, T, H)
 
-        # 4. Global pooling across sequence steps (use last element for forecast)
-        last_step = x_norm[:, -1, :] # (batch, hidden)
-        
-        out = self.output_proj(last_step) # (batch, 1)
+        # 4. Gated Residual Network
+        gated_out = self.gate_layer(x_res2)
+        x_final = self.layer_norm2(x_res2 + gated_out)
+
+        # 5. Take last time-step for point forecast
+        last_step = x_final[:, -1, :]                             # (B, H)
+
+        out = self.output_proj(last_step)                         # (B, 1)
         return out.squeeze(-1)
 
 
@@ -172,14 +183,14 @@ class TFTAttentionRegressor(BaseEstimator, RegressorMixin):
     Enables direct integration with MAPIE conformal calibration.
     """
     def __init__(
-        self, 
-        input_dim: int = 5, 
-        seq_len: int = 15, 
-        hidden_dim: int = 32, 
-        num_heads: int = 2,
-        lr: float = 0.005,
+        self,
+        input_dim: int = 5,
+        seq_len: int = 15,
+        hidden_dim: int = 64,
+        num_heads: int = 4,
+        lr: float = 0.003,
         epochs: int = 40,
-        batch_size: int = 16
+        batch_size: int = 32
     ):
         self.input_dim = input_dim
         self.seq_len = seq_len
@@ -254,6 +265,10 @@ class TFTAttentionRegressor(BaseEstimator, RegressorMixin):
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=1e-4)
+        # Cosine annealing: smoothly decays lr from self.lr → eta_min over all epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(self.epochs, 1), eta_min=1e-5
+        )
 
         # Training loop — fires progress_callback(epoch, total_epochs, loss) each epoch
         self.net.train()
@@ -266,9 +281,12 @@ class TFTAttentionRegressor(BaseEstimator, RegressorMixin):
                 pred = self.net(batch_x)
                 loss = criterion(pred, batch_y)
                 loss.backward()
+                # Gradient clipping: prevents exploding gradients on volatile financial series
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
                 optimizer.step()
                 epoch_loss += loss.item()
                 batch_count += 1
+            scheduler.step()
             avg_loss = epoch_loss / max(batch_count, 1)
             # Fire callback if provided — used to update global progress state for polling
             if progress_callback is not None:

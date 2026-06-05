@@ -41,6 +41,10 @@ from app.math_module import (
     fit_macro_var,
     calculate_rsi,
     calculate_macd,
+    calculate_atr,
+    calculate_bollinger_position,
+    calculate_obv,
+    calculate_rolling_skew_kurt,
     calculate_index_metrics
 )
 from app.models import RegimeDetector, EnsembleForecaster, training_state, update_training_state
@@ -368,9 +372,15 @@ def trigger_pipeline(
         regimes = hmm.predict(aligned_df['log_returns'], aligned_df['rolling_volatility'])
         aligned_df['regime'] = regimes
 
-        # Technical Indicators calculation
+        # Technical Indicators
         aligned_df['rsi'] = calculate_rsi(aligned_df['close'])
         aligned_df['macd'] = calculate_macd(aligned_df['close'])
+        aligned_df['atr'] = calculate_atr(aligned_df['high'], aligned_df['low'], aligned_df['close'])
+        aligned_df['bb_pct'] = calculate_bollinger_position(aligned_df['close'])
+        aligned_df['obv'] = calculate_obv(aligned_df['close'], aligned_df['volume'])
+        skew_s, kurt_s = calculate_rolling_skew_kurt(aligned_df['log_returns'])
+        aligned_df['rolling_skew'] = skew_s
+        aligned_df['rolling_kurt'] = kurt_s
 
         # Compute Index Benchmarking statistics relative to Nifty 50 (^NSEI)
         beta, alpha, correlation = 1.0, 0.0, 1.0
@@ -410,7 +420,12 @@ def trigger_pipeline(
             'sentiment_score': aligned_df['sentiment_score'].fillna(0.0),
             'rolling_volatility': aligned_df['rolling_volatility'].fillna(0.0),
             'rsi': aligned_df['rsi'].fillna(50.0),
-            'macd': aligned_df['macd'].fillna(0.0)
+            'macd': aligned_df['macd'].fillna(0.0),
+            'atr': aligned_df['atr'].fillna(0.0),
+            'bb_pct': aligned_df['bb_pct'].fillna(0.5),
+            'obv': aligned_df['obv'].fillna(0.0),
+            'rolling_skew': aligned_df['rolling_skew'].fillna(0.0),
+            'rolling_kurt': aligned_df['rolling_kurt'].fillna(0.0),
         })
 
         # Remove previous custom files with same name to prevent accumulation
@@ -545,7 +560,14 @@ def predict_forecast_envelope(
         # Calculate returns
         log_returns = np.log(df['close_raw'] / df['close_raw'].shift(1)).fillna(0.0).values
 
-        # 2. Extract inputs X (including technical indicators)
+        # 2. Extract inputs X — 11 features: price, volatility, sentiment, pcr, rsi, macd,
+        #    log_returns, atr, bollinger_pct, obv, rolling_skew (richer signal for TFT/GBR)
+        def _safe_col(col: str, fill: float = 0.0) -> np.ndarray:
+            """Load column from df, returning fill array if column doesn't exist (old data)."""
+            if col in df.columns:
+                return df[col].fillna(fill).values
+            return np.full(len(df), fill)
+
         X = np.column_stack([
             df['close_raw'].values,
             df['rolling_volatility'].values,
@@ -553,7 +575,11 @@ def predict_forecast_envelope(
             df['pcr_oi'].values,
             df['rsi'].values,
             df['macd'].values,
-            log_returns
+            log_returns,
+            _safe_col('atr', 0.0),
+            _safe_col('bb_pct', 0.5),
+            _safe_col('obv', 0.0),
+            _safe_col('rolling_skew', 0.0),
         ])
         
         seq_len = 15
