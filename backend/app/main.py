@@ -47,7 +47,7 @@ from app.math_module import (
     calculate_rolling_skew_kurt,
     calculate_index_metrics
 )
-from app.models import RegimeDetector, EnsembleForecaster, training_state, update_training_state
+from app.models import RegimeDetector, EnsembleForecaster, training_state, update_training_state, reset_training_state
 from app.risk import run_conformal_forecasting, apex_backtester
 from app.utils import get_nse_trading_days
 
@@ -193,6 +193,7 @@ async def upload_custom_dataset(
     HMM classification, and conformal predictions immediately.
     """
     try:
+        reset_training_state()
         filename = file.filename.lower()
         contents = await file.read()
         
@@ -323,6 +324,15 @@ def trigger_pipeline(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
 ):
     try:
+        reset_training_state()
+        update_training_state(
+            phase="start",
+            model="ApexDataIngestor",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label=f"Initializing ingestion pipeline for {ticker}...",
+            pct=5.0
+        )
+
         if not end_date:
             end_date = datetime.today().strftime('%Y-%m-%d')
         if not start_date:
@@ -343,6 +353,14 @@ def trigger_pipeline(
         if aligned_df.empty:
             raise HTTPException(status_code=404, detail="No historical data retrieved.")
 
+        update_training_state(
+            phase="ffd",
+            model="FFD Memory Optimizer",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🧬 Running Fractional Differencing (FFD) stationary memory calibration...",
+            pct=65.0
+        )
+
         # Apply Mathematical Preprocessing
         close_series = aligned_df['close']
         log_close = np.log(close_series)
@@ -350,6 +368,14 @@ def trigger_pipeline(
         optimal_d = find_optimal_d(log_close)
         close_ffd = fractional_differencing_ffd(close_series, d=optimal_d)
         aligned_df['close_ffd'] = close_ffd
+
+        update_training_state(
+            phase="emd",
+            model="EMD Decomposer",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🧮 Decomposing non-stationary prices via EMD cycles...",
+            pct=75.0
+        )
 
         # High-Performance Lookback for EMD cycles (prevents CPU lockups on long IPO series)
         if len(close_series) > 1000:
@@ -364,6 +390,14 @@ def trigger_pipeline(
 
         aligned_df['rolling_volatility'] = aligned_df['log_returns'].rolling(window=20).std()
         aligned_df['rolling_volatility'] = aligned_df['rolling_volatility'].fillna(0.0)
+
+        update_training_state(
+            phase="hmm",
+            model="Gaussian HMM",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🔮 Calibrating Hidden Markov Model regime transition boundaries...",
+            pct=85.0
+        )
 
         # HMM Regime Detection
         print("Calibrating Hidden Markov Model regimes...")
@@ -381,6 +415,14 @@ def trigger_pipeline(
         skew_s, kurt_s = calculate_rolling_skew_kurt(aligned_df['log_returns'])
         aligned_df['rolling_skew'] = skew_s
         aligned_df['rolling_kurt'] = kurt_s
+
+        update_training_state(
+            phase="benchmark",
+            model="Index Metrics Calculator",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="⚖️ Calculating systematic index-risk metrics (Beta/Alpha)...",
+            pct=90.0
+        )
 
         # Compute Index Benchmarking statistics relative to Nifty 50 (^NSEI)
         beta, alpha, correlation = 1.0, 0.0, 1.0
@@ -432,6 +474,14 @@ def trigger_pipeline(
         db_manager.execute(f"DELETE FROM processed_features WHERE ticker = '{ticker}'")
         db_manager.save_dataframe("processed_features", features_df, if_exists="append")
         
+        update_training_state(
+            phase="fundamentals",
+            model="Screener Scraper",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🕸️ Scraping corporate financial ratios from Screener.in...",
+            pct=95.0
+        )
+
         # Fetch and save fundamentals from Screener.in / yfinance fallback
         fundamentals = {"market_cap": 0.0, "pe_ratio": 0.0, "roce": 0.0, "roe": 0.0, "debt_to_equity": 0.0, "dividend_yield": 0.0, "book_value": 0.0, "sales_growth": 0.0, "source": "None"}
         try:
@@ -456,6 +506,14 @@ def trigger_pipeline(
         # Ensure timestamp is clean string representation
         aligned_df['timestamp'] = pd.to_datetime(aligned_df['timestamp']).dt.strftime('%Y-%m-%d')
         
+        update_training_state(
+            phase="done",
+            model="",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="Dataset ingestion and feature math pipelines completed.",
+            pct=100.0
+        )
+
         return {
             "status": "success",
             "ticker": ticker,
@@ -471,6 +529,13 @@ def trigger_pipeline(
         }
     except Exception as e:
         print(f"Pipeline failure: {e}")
+        update_training_state(
+            phase="idle",
+            model="",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label=f"Pipeline failure: {str(e)}",
+            pct=0.0
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/data/preview")
@@ -519,6 +584,7 @@ def predict_forecast_envelope(
     Customizes ensembling and conformal widths based on Screener/Yahoo Finance fundamental metrics.
     """
     try:
+        reset_training_state()
         # 1. Load aligned preprocessed features
         query = f"SELECT * FROM processed_features WHERE ticker = '{ticker}' ORDER BY timestamp ASC"
         df = db_manager.load_dataframe(query)
@@ -707,6 +773,10 @@ def predict_forecast_envelope(
             gbr_val = float(pred_dict["gbr"][-1])
             hw_val = float(pred_dict["hw"][-1])
             
+            update_training_state(
+                log=f"🔮 Horizon {h}/{horizon_steps} Predicted: Rs. {pred_val:.2f} [TFT:{tft_val:.1f}, GBR:{gbr_val:.1f}, Ridge:{ridge_val:.1f}, HW:{hw_val:.1f}]"
+            )
+            
             l90, u90 = float(bounds_90_h[-1, 0]), float(bounds_90_h[-1, 1])
             l95, u95 = float(bounds_95_h[-1, 0]), float(bounds_95_h[-1, 1])
             
@@ -769,6 +839,7 @@ def trigger_backtesting(
     Rigorously evaluates strategy out-of-sample performance over historic rolling indices.
     """
     try:
+        reset_training_state()
         # Load aligned datasets
         query = f"SELECT * FROM processed_features WHERE ticker = '{ticker}' ORDER BY timestamp ASC"
         df = db_manager.load_dataframe(query)

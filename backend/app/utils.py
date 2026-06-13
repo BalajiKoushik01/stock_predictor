@@ -158,15 +158,21 @@ def align_time_series(
         ohlcv_df = ohlcv_df.set_index('timestamp')
     ohlcv_df.index = pd.to_datetime(ohlcv_df.index)
 
-    # Establish the calendar boundaries
-    start_date = ohlcv_df.index.min()
-    end_date = ohlcv_df.index.max()
+    # Save original timestamps (with their time components, e.g. 09:15:00)
+    # mapped by date for restoring at the end.
+    original_timestamps = pd.Series(ohlcv_df.index, index=ohlcv_df.index.normalize())
+
+    # Establish the calendar boundaries using normalized dates
+    start_date = ohlcv_df.index.normalize().min()
+    end_date = ohlcv_df.index.normalize().max()
     
-    # Create the strict trading-day calendar
-    nse_calendar = get_nse_trading_days(start_date, end_date)
+    # Create the strict trading-day calendar (it will have 00:00:00 timestamps)
+    nse_calendar = pd.DatetimeIndex([d for d in pd.date_range(start_date, end_date, freq='D') if not is_nse_holiday(d.date())])
     
-    # Reindex OHLCV to fill any missing market sessions
-    aligned_df = ohlcv_df.reindex(nse_calendar)
+    # Reindex OHLCV (normalized to 00:00:00) to fill any missing market sessions
+    ohlcv_norm = ohlcv_df.copy()
+    ohlcv_norm.index = ohlcv_norm.index.normalize()
+    aligned_df = ohlcv_norm.reindex(nse_calendar)
     aligned_df.index.name = 'timestamp'
     
     # Forward-fill prices to handle occasional intra-day data gaps
@@ -181,17 +187,22 @@ def align_time_series(
     if options_df is not None and not options_df.empty:
         if 'timestamp' in options_df.columns:
             options_df = options_df.set_index('timestamp')
-        options_df.index = pd.to_datetime(options_df.index)
+        options_df.index = pd.to_datetime(options_df.index).normalize()
         
         # Reindex option chain values to calendar and ffill
         options_aligned = options_df.reindex(nse_calendar).ffill().fillna(0.0)
         
         # Merge options features
         aligned_df = aligned_df.join(options_aligned[['pcr_oi', 'pcr_volume', 'total_oi', 'ce_oi', 'pe_oi']], how='left')
+        aligned_df['pcr_oi'] = aligned_df['pcr_oi'].fillna(1.0) # PCR neutral default is 1.0
+        aligned_df['pcr_volume'] = aligned_df['pcr_volume'].fillna(1.0)
+        aligned_df['total_oi'] = aligned_df['total_oi'].fillna(0.0)
+        aligned_df['ce_oi'] = aligned_df['ce_oi'].fillna(0.0)
+        aligned_df['pe_oi'] = aligned_df['pe_oi'].fillna(0.0)
     else:
         # Default options features if not provided
-        aligned_df['pcr_oi'] = 0.0
-        aligned_df['pcr_volume'] = 0.0
+        aligned_df['pcr_oi'] = 1.0
+        aligned_df['pcr_volume'] = 1.0
         aligned_df['total_oi'] = 0.0
         aligned_df['ce_oi'] = 0.0
         aligned_df['pe_oi'] = 0.0
@@ -200,10 +211,12 @@ def align_time_series(
     if sentiment_df is not None and not sentiment_df.empty:
         if 'timestamp' in sentiment_df.columns:
             sentiment_df = sentiment_df.set_index('timestamp')
-        sentiment_df.index = pd.to_datetime(sentiment_df.index)
+        sentiment_df.index = pd.to_datetime(sentiment_df.index).normalize()
         
         # Fill non-news days with 0.0 (neutral sentiment) rather than ffilling,
-        # representing that no active sentiment event occurred on that session
+        # representing that no active sentiment event occurred on that session.
+        # Note: scrape_sentiment already handles decay inside the daily series,
+        # so reindexing with fillna(0.0) is correct here.
         sentiment_aligned = sentiment_df.reindex(nse_calendar).fillna(0.0)
         
         aligned_df = aligned_df.join(sentiment_aligned[['sentiment_score']], how='left')
@@ -211,7 +224,17 @@ def align_time_series(
     else:
         aligned_df['sentiment_score'] = 0.0
 
-    # Clean up column structure and reset index for storage
+    # Restore original timestamps (with their time components, e.g. 09:15:00)
+    # For any dates not in original_timestamps (e.g. filled gaps), we construct a timestamp at 09:15:00.
+    new_timestamps = []
+    for d in aligned_df.index:
+        orig = original_timestamps.get(d)
+        if pd.notna(orig):
+            new_timestamps.append(orig)
+        else:
+            new_timestamps.append(pd.Timestamp(year=d.year, month=d.month, day=d.day, hour=9, minute=15))
+            
+    aligned_df.index = pd.DatetimeIndex(new_timestamps)
     aligned_df = aligned_df.reset_index().rename(columns={'index': 'timestamp'})
     
     return aligned_df

@@ -69,6 +69,15 @@ class DatabaseManager:
                 )
             """)
 
+            # If the table exists but is missing the new columns, recreate it
+            try:
+                cols = conn.execute("PRAGMA table_info(processed_features)").df()
+                if not cols.empty and len(cols) < 15:
+                    print("Updating processed_features table schema to include institutional indicators...")
+                    conn.execute("DROP TABLE processed_features")
+            except Exception as pe:
+                print(f"Error checking processed_features table: {pe}")
+
             # 4. Final Preprocessed Feature Table for ML ingestion
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS processed_features (
@@ -82,6 +91,11 @@ class DatabaseManager:
                     rolling_volatility DOUBLE,
                     rsi DOUBLE,
                     macd DOUBLE,
+                    atr DOUBLE,
+                    bb_pct DOUBLE,
+                    obv DOUBLE,
+                    rolling_skew DOUBLE,
+                    rolling_kurt DOUBLE,
                     PRIMARY KEY (timestamp, ticker)
                 )
             """)

@@ -28,12 +28,51 @@ training_state: dict = {
     "horizon_total": 0,        # Total horizon steps
     "step_label": "",          # Human-readable progress label
     "pct": 0.0,                # Overall progress 0.0–100.0
+    "logs": [],                # List of progress log messages
 }
 
 def update_training_state(**kwargs):
     """Thread-safe update of global training_state."""
     with _progress_lock:
+        if 'step_label' in kwargs and kwargs['step_label'] != training_state.get('step_label'):
+            label = kwargs['step_label']
+            if label:
+                from datetime import datetime
+                time_str = datetime.now().strftime("%H:%M:%S")
+                msg = f"[{time_str}] {label}"
+                if not training_state['logs'] or training_state['logs'][-1] != msg:
+                    training_state['logs'].append(msg)
+                    if len(training_state['logs']) > 150:
+                        training_state['logs'].pop(0)
+                        
+        if 'log' in kwargs:
+            log_msg = kwargs['log']
+            if log_msg:
+                from datetime import datetime
+                time_str = datetime.now().strftime("%H:%M:%S")
+                msg = f"[{time_str}] {log_msg}"
+                training_state['logs'].append(msg)
+                if len(training_state['logs']) > 150:
+                    training_state['logs'].pop(0)
+            kwargs = {k: v for k, v in kwargs.items() if k != 'log'}
+
         training_state.update(kwargs)
+
+def reset_training_state():
+    """Resets the global training progress state."""
+    with _progress_lock:
+        training_state.update({
+            "phase": "idle",
+            "model": "",
+            "epoch": 0,
+            "total_epochs": 0,
+            "loss": 0.0,
+            "horizon_step": 0,
+            "horizon_total": 0,
+            "step_label": "",
+            "pct": 0.0,
+            "logs": [],
+        })
 
 class RegimeDetector:
     """

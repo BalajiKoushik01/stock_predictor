@@ -43,6 +43,7 @@ except ImportError:
     JUGAAD_DATA_AVAILABLE = False
 
 import yfinance as yf
+from app.models import update_training_state
 
 # Initialize FinBERT Model & Tokenizer lazily for faster imports
 FINBERT_MODEL_NAME = "yiyanghkust/finbert-tone"
@@ -182,62 +183,64 @@ class ApexDataIngestor:
 
     def fetch_options_microstructure(self, ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        Fetches real PCR (Put-Call Ratio) from yfinance live options chain.
-        Falls back to a volatility-calibrated deterministic simulator only when no options exist.
+        Fetches live option contracts from yfinance to extract the actual Put-Call Ratio (PCR)
+        and Open Interest (OI) metrics. Non-optionable stocks default to a neutral PCR of 1.0.
         """
-        print(f"Fetching options microstructure for {ticker}...")
+        print(f"Fetching real options microstructure for {ticker}...")
         dates = pd.date_range(start=start_date, end=end_date, freq='D')
 
-        # ── Attempt: fetch real PCR from yfinance options chain ──
+        # ── Fetch real options chain data from yfinance ──
         real_pcr_map: Dict[str, float] = {}
+        is_optionable = False
+        anchor_pcr = 1.0
+        total_ce_oi = 0.0
+        total_pe_oi = 0.0
+        
         try:
             yf_sym = f"{ticker}.NS" if not ticker.endswith(".NS") else ticker
             stock = yf.Ticker(yf_sym)
-            exps = stock.options  # tuple of expiry date strings e.g. '2024-01-25'
+            exps = stock.options  # list of expiry date strings
             if exps:
-                for exp in exps[:6]:  # limit to nearest 6 expiries to stay fast
+                is_optionable = True
+                for exp in exps[:6]:  # fetch nearest 6 expiries to stay fast
                     try:
                         chain = stock.option_chain(exp)
                         ce_oi = float(chain.calls['openInterest'].sum()) if not chain.calls.empty else 0.0
                         pe_oi = float(chain.puts['openInterest'].sum())  if not chain.puts.empty  else 0.0
+                        total_ce_oi += ce_oi
+                        total_pe_oi += pe_oi
                         if ce_oi > 0:
-                            pcr = round(pe_oi / ce_oi, 4)
-                            real_pcr_map[exp] = min(max(pcr, 0.3), 3.0)  # clip to sane range
+                            real_pcr_map[exp] = round(pe_oi / ce_oi, 4)
                     except Exception:
                         continue
+                        
                 if real_pcr_map:
-                    print(f"[OPTIONS OK] {ticker}: fetched real PCR for {len(real_pcr_map)} expiries: "
-                          f"{list(real_pcr_map.items())[:3]}")
-        except Exception as e:
-            print(f"yfinance options chain failed: {e}. Using calibrated simulator.")
-
-        # Build per-date PCR: use real values where available, forward-fill, then simulate
-        records = []
-        last_real_pcr: Optional[float] = None
-        if real_pcr_map:
-            # Use nearest expiry PCR as a proxy for today's microstructure
-            sorted_exp = sorted(real_pcr_map.keys())
-            last_real_pcr = real_pcr_map[sorted_exp[0]]
-
-        for dt in dates:
-            # If real PCR data exists, carry it forward for all historical dates
-            if last_real_pcr is not None:
-                # Introduce mild daily variation around the real anchor (±3%)
-                np.random.seed(dt.year * 10000 + dt.month * 100 + dt.day)
-                noise = np.random.normal(0, 0.03)
-                pcr_oi = float(min(max(last_real_pcr + noise, 0.4), 2.5))
-                pcr_volume = float(min(max(pcr_oi * (1.0 + np.random.normal(0, 0.05)), 0.3), 2.8))
+                    anchor_pcr = float(np.mean(list(real_pcr_map.values())))
+                    anchor_pcr = min(max(anchor_pcr, 0.3), 3.0)  # clip to a sane financial range
+                    print(f"[OPTIONS OK] {ticker} is optionable. Average live PCR: {anchor_pcr:.4f}, Total OI: {total_ce_oi + total_pe_oi:.0f}")
+                else:
+                    print(f"[INFO] {ticker} has empty option chain. Defaulting to neutral options metrics.")
             else:
-                # Pure deterministic fallback: sinusoidal + seeded noise
-                np.random.seed(dt.year * 10000 + dt.month * 100 + dt.day)
-                base_pcr = 0.9 + 0.2 * np.sin(dt.day / 5.0)
-                noise = np.random.normal(0, 0.05)
-                pcr_oi = float(min(max(base_pcr + noise, 0.5), 2.0))
-                pcr_volume = float(min(max(base_pcr * 1.05 + noise * 1.2, 0.4), 2.2))
+                print(f"[INFO] {ticker} does not trade options (non-F&O stock). Using neutral options metrics.")
+        except Exception as e:
+            print(f"yfinance option chain fetch failed for {ticker}: {e}. Defaulting to neutral metrics.")
 
-            total_oi = 5_000_000 + int(np.random.normal(0, 200_000))
-            ce_oi = int(total_oi / (pcr_oi + 1))
-            pe_oi = total_oi - ce_oi
+        # Build daily records
+        records = []
+        for dt in dates:
+            if is_optionable:
+                pcr_oi = anchor_pcr
+                pcr_volume = anchor_pcr
+                total_oi = total_ce_oi + total_pe_oi
+                ce_oi = total_ce_oi
+                pe_oi = total_pe_oi
+            else:
+                # Completely neutral, non-simulated values for non-optionable assets
+                pcr_oi = 1.0
+                pcr_volume = 1.0
+                total_oi = 0.0
+                ce_oi = 0.0
+                pe_oi = 0.0
 
             records.append({
                 'timestamp': dt, 'ticker': ticker,
@@ -251,53 +254,97 @@ class ApexDataIngestor:
 
     def scrape_sentiment(self, ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        Headless scraping of financial news index from Moneycontrol / Economic Times 
-        for the target equity, passed through the FinBERT model to output daily scores.
+        Gathers actual financial news using Google News RSS feeds and Moneycontrol tag pages,
+        analyzes headlines with the FinBERT model, and tracks real historical sentiment.
         """
-        print(f"Scraping news sentiment for {ticker}...")
+        import xml.etree.ElementTree as ET
+        import urllib.request
+        import urllib.parse
+        from email.utils import parsedate_to_datetime
+        
+        print(f"Scraping live news sentiment for {ticker}...")
         dates = pd.date_range(start=start_date, end=end_date, freq='D')
         records = []
-        
-        # Scrape Moneycontrol search query for this ticker
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
         headlines_by_date: Dict[str, List[str]] = {}
         
+        # 1. Resolve company name from local nse_stocks.json for better search relevance
+        company_name = ticker
         try:
-            # Search query URL
-            url = f"https://www.moneycontrol.com/news/tags/{ticker.lower()}.html"
-            res = requests.get(url, headers=headers, timeout=10)
+            import json
+            json_path = os.path.join(os.path.dirname(__file__), "nse_stocks.json")
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    stocks_list = json.load(f)
+                    for st in stocks_list:
+                        if st["symbol"].upper() == ticker.upper():
+                            company_name = st["name"]
+                            break
+        except Exception as je:
+            print(f"Error resolving company name: {je}")
+
+        # 2. Gather news from Google News RSS feeds (Highly resilient & real-time)
+        queries = [f"{ticker} stock NSE"]
+        if company_name != ticker:
+            queries.append(f"{company_name} stock")
             
+        for q in queries:
+            try:
+                url = f"https://news.google.com/rss/search?q={urllib.parse.quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en"
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=10) as res:
+                    tree = ET.parse(res)
+                    root = tree.getroot()
+                    for item in root.findall('.//item'):
+                        title = item.find('title')
+                        pub_date = item.find('pubDate')
+                        desc = item.find('description')
+                        
+                        headline = title.text if title is not None else ""
+                        description = desc.text if desc is not None else ""
+                        
+                        if pub_date is not None and pub_date.text:
+                            try:
+                                dt = parsedate_to_datetime(pub_date.text)
+                                date_iso = dt.date().isoformat()
+                                if date_iso not in headlines_by_date:
+                                    headlines_by_date[date_iso] = []
+                                content = f"{headline}. {description}" if description else headline
+                                headlines_by_date[date_iso].append(content)
+                            except Exception:
+                                continue
+            except Exception as ree:
+                print(f"Google News RSS fetch failed for query '{q}': {ree}")
+
+        # 3. Fallback/Complementary Moneycontrol scraper
+        try:
+            url = f"https://www.moneycontrol.com/news/tags/{ticker.lower()}.html"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
-                # Find all news items
                 news_items = soup.find_all('li', class_='clearfix')
-                
                 for item in news_items:
                     h2 = item.find('h2')
                     p = item.find('p')
                     span = item.find('span')
-                    
                     if h2 and span:
                         headline = h2.text.strip()
                         desc = p.text.strip() if p else ""
-                        date_str = span.text.strip() # e.g. "May 28, 2026 03:30 PM"
-                        
+                        date_str = span.text.strip()
                         try:
-                            # Parse date string
-                            # Example parsing: "May 28, 2026"
                             parsed_date = None
                             for fmt in ("%B %d, %Y %I:%M %p", "%b %d, %Y %I:%M %p"):
                                 try:
-                                    # Truncate at PM/AM to avoid extra text
                                     clean_date_str = " ".join(date_str.split()[:4])
                                     parsed_date = datetime.strptime(clean_date_str, "%B %d, %Y").date()
                                     break
                                 except Exception:
                                     continue
-                            
                             if parsed_date:
                                 date_iso = parsed_date.isoformat()
                                 if date_iso not in headlines_by_date:
@@ -305,25 +352,40 @@ class ApexDataIngestor:
                                 headlines_by_date[date_iso].append(f"{headline}. {desc}")
                         except Exception:
                             continue
-        except Exception as e:
-            print(f"Moneycontrol news scraping failed: {e}. Using high-fidelity sentiment index.")
+        except Exception as mce:
+            print(f"Moneycontrol news scraping failed: {mce}")
 
-        # Process each session date
+        # 4. Process each date, applying exponential decay memory for missing news dates
+        last_known_sentiment = 0.0
+        total_dates = len(dates)
+        news_dates_count = sum(1 for dt in dates if dt.strftime('%Y-%m-%d') in headlines_by_date and len(headlines_by_date[dt.strftime('%Y-%m-%d')]) > 0)
+        processed_news_dates = 0
+        
+        update_training_state(log=f"📰 Found news headlines on {news_dates_count} distinct dates. Starting sentiment classification...")
+        
         for dt in dates:
             date_iso = dt.strftime('%Y-%m-%d')
             
             if date_iso in headlines_by_date and len(headlines_by_date[date_iso]) > 0:
-                # Calculate FinBERT sentiment score for all articles on this session
-                scores = [get_finbert_sentiment(text) for text in headlines_by_date[date_iso]]
+                processed_news_dates += 1
+                update_training_state(
+                    log=f"🤖 [{processed_news_dates}/{news_dates_count}] Processing headlines on {date_iso}:"
+                )
+                scores = []
+                for idx, text in enumerate(headlines_by_date[date_iso]):
+                    # Clean/trim title for display
+                    trimmed = text[:65] + "..." if len(text) > 65 else text
+                    update_training_state(log=f"   → Analyzing ({idx+1}/{len(headlines_by_date[date_iso])}): '{trimmed}'")
+                    scores.append(get_finbert_sentiment(text))
+                    
                 avg_score = float(np.mean(scores))
                 article_count = len(scores)
+                last_known_sentiment = avg_score
             else:
-                # Synthesise natural daily market sentiment flow linked to price movement simulation
-                # Standard business sentiment tends to have positive mean drift with mild volatility
-                np.random.seed(dt.year * 999 + dt.month * 88 + dt.day)
-                avg_score = float(np.random.normal(0.05, 0.15))
-                avg_score = max(-1.0, min(1.0, avg_score))
-                article_count = 1
+                # Decays towards 0.0 (neutral) by 10% daily to represent fading market sentiment memory
+                avg_score = last_known_sentiment * 0.90
+                article_count = 0
+                last_known_sentiment = avg_score
                 
             records.append({
                 'timestamp': dt,
@@ -334,6 +396,9 @@ class ApexDataIngestor:
             
         df = pd.DataFrame(records)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        msg = f"✅ Finished news sentiment logs processing for {ticker} ({len(df)} days)."
+        update_training_state(log=msg)
+        print(msg)
         return df
 
     def run_pipeline(self, ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -345,13 +410,46 @@ class ApexDataIngestor:
         from app.database import db_manager
         from app.utils import align_time_series
         
+        update_training_state(
+            phase="ingestion_ohlcv",
+            model="ApexDataIngestor",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label=f"🔌 Ingesting historical OHLCV data for {ticker}...",
+            pct=10.0
+        )
+        
         # 1. Fetch individual components
         ohlcv_df = self.fetch_ohlcv(ticker, start_date, end_date)
         if ohlcv_df.empty:
             raise ValueError(f"No OHLCV price data found for ticker {ticker}.")
             
+        update_training_state(
+            phase="ingestion_options",
+            model="ApexDataIngestor",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label=f"📊 Ingesting options chain open interest (PCR) for {ticker}...",
+            pct=25.0
+        )
+        
         options_df = self.fetch_options_microstructure(ticker, start_date, end_date)
+        
+        update_training_state(
+            phase="ingestion_sentiment",
+            model="ApexDataIngestor",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🕸️ Scraping financial news & running FinBERT sentiment analysis...",
+            pct=40.0
+        )
+        
         sentiment_df = self.scrape_sentiment(ticker, start_date, end_date)
+        
+        update_training_state(
+            phase="ingestion_align",
+            model="ApexDataIngestor",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="🧬 Aligning datasets on holiday-aware NSE trading calendar...",
+            pct=55.0
+        )
         
         # 2. Concurrently fetch and save Nifty 50 Index benchmark prices
         try:

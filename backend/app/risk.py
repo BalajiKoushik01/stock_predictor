@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple
 
-from app.models import TFTAttentionRegressor
+from app.models import TFTAttentionRegressor, update_training_state
 
 def run_conformal_forecasting(
     train_features: np.ndarray,
@@ -125,7 +125,13 @@ class WalkForwardBacktester:
         log_returns = aligned_df['log_returns'].values
         regimes = aligned_df['regime'].values if 'regime' in aligned_df.columns else np.zeros(N)
 
-        # Build basic 2D feature matrix X:
+        # Helper to safely load columns
+        def _safe_col(col: str, fill: float = 0.0) -> np.ndarray:
+            if col in aligned_df.columns:
+                return aligned_df[col].fillna(fill).values
+            return np.full(N, fill)
+
+        # Build feature matrix X matching predict features exactly (11 features):
         X = np.column_stack([
             close_prices,
             volatility,
@@ -133,7 +139,11 @@ class WalkForwardBacktester:
             pcr,
             rsi,
             macd,
-            log_returns
+            log_returns,
+            _safe_col('atr', 0.0),
+            _safe_col('bb_pct', 0.5),
+            _safe_col('obv', 0.0),
+            _safe_col('rolling_skew', 0.0),
         ])
         
         # Target: Forward price levels at the horizon step
@@ -153,18 +163,49 @@ class WalkForwardBacktester:
         step_size = 10
         print(f"Executing Walk-Forward Backtester across {N - min_train_days} sessions...")
         
+        update_training_state(
+            phase="backtest_start",
+            model="WalkForwardBacktester",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="⏱️ Preparing out-of-sample walk-forward parameters...",
+            pct=5.0
+        )
+        
         from app.models import EnsembleForecaster, TFTAttentionRegressor
         
         # ─── OPTIMIZATION: Pre-train a shared TFT once on the full dataset ───
         # Without this: each of ~50 rolling windows trains TFT from scratch (~3 epochs × 50 = 150 GPU/CPU passes)
         # With this: 1 TFT pre-train + only Ridge/GBR/HW retrain per window (fast sklearn models, <1s each)
         print("[OPTIMIZE] Pre-training shared TFT for walk-forward backtester...")
+        
+        update_training_state(
+            phase="backtest_tft_pretrain",
+            model="TFT",
+            epoch=0, total_epochs=3, loss=0.0,
+            step_label="🏋️ Pre-training shared walk-forward TFT model...",
+            pct=10.0
+        )
+        
+        # We can pass a callback to update epochs of the pretraining TFT
+        def bt_tft_cb(ep, total, loss):
+            pct = round(10.0 + (ep / total) * 10.0, 1)
+            update_training_state(
+                phase="backtest_tft_pretrain",
+                model="TFT",
+                epoch=ep, total_epochs=total, loss=round(loss, 6),
+                step_label=f"🏋️ TFT Pre-training Epoch {ep}/{total} - Loss: {loss:.6f}",
+                pct=pct
+            )
+
         shared_bt_tft = TFTAttentionRegressor(seq_len=15, epochs=3, batch_size=16, lr=0.005)
-        shared_bt_tft.fit(X, y)
+        shared_bt_tft.fit(X, y, progress_callback=bt_tft_cb)
         shared_bt_tft.epochs = 0  # freeze — skip re-training in subsequent steps
         print("[OPTIMIZE] Shared backtest TFT pre-trained. Running walk-forward windows...")
 
-        for i in range(min_train_days, N - horizon_steps, step_size):
+        backtest_range = list(range(min_train_days, N - horizon_steps, step_size))
+        total_steps = len(backtest_range)
+
+        for idx, i in enumerate(backtest_range):
             # Dynamic rolling split
             train_features = X[:i]
             train_targets = y[:i]
@@ -172,11 +213,23 @@ class WalkForwardBacktester:
             actual_targets = y[i : i + step_size]
             test_regimes = regimes[i : i + step_size]
 
+            pct = round(20.0 + (idx / max(1, total_steps)) * 75.0, 1)
+            update_training_state(
+                phase="backtest_rolling",
+                model="Ensemble",
+                epoch=0, total_epochs=0, loss=0.0,
+                step_label=f"⚙️ Backtest: Fitting segment {idx+1}/{total_steps} (Ridge, GBR, Holt-Winters)...",
+                pct=pct
+            )
+
             # Fit Ensemble Forecaster — inject frozen TFT, only Ridge/GBR/HW retrain each window
             ensemble = EnsembleForecaster(seq_len=15, tft_epochs=0)
             ensemble.tft = shared_bt_tft
             try:
                 ensemble.fit(train_features, train_targets)
+                update_training_state(
+                    log=f"⚙️ Fitted Backtest Segment {idx+1}/{total_steps} (Ridge, GBR, Holt-Winters on {len(train_features)} days)."
+                )
                 
                 # Predict on the test segment passing preceding lookback context
                 lookback_test_features = X[i - ensemble.seq_len : i + step_size]
@@ -224,6 +277,14 @@ class WalkForwardBacktester:
             except Exception:
                 # Catch training failures gracefully
                 continue
+
+        update_training_state(
+            phase="done",
+            model="WalkForwardBacktester",
+            epoch=0, total_epochs=0, loss=0.0,
+            step_label="Walk-forward backtest simulation completed.",
+            pct=100.0
+        )
 
         # Strategy Performance Calculation
         # Shift signals by 1 to represent execution lag
