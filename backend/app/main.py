@@ -1,19 +1,5 @@
-import sys
-# Mask curl_cffi from being imported by yfinance to prevent TLS certificate errors
-sys.modules['curl_cffi'] = None
-sys.modules['curl_cffi.requests'] = None
-
-import ssl
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Disable standard library SSL validation
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-
 import os
+import re
 import json
 import numpy as np
 import pandas as pd
@@ -22,13 +8,6 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-
-# Disable requests validation globally
-original_requests_request = requests.Session.request
-def patched_requests_request(self, method, url, *args, **kwargs):
-    kwargs['verify'] = False
-    return original_requests_request(self, method, url, *args, **kwargs)
-requests.Session.request = patched_requests_request
 
 
 from app.database import db_manager
@@ -61,15 +40,15 @@ except Exception:
 
 app = FastAPI(
     title="Project Apex API",
-    description="Institutional-grade Quantitative Forecasting & Mathematical Feature Engineering Engine",
+    description="Experimental quantitative analysis and forecasting API",
     version="1.0.0"
 )
 
 # Allow CORS for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip() and origin.strip() != "*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -194,8 +173,15 @@ async def upload_custom_dataset(
     """
     try:
         reset_training_state()
-        filename = file.filename.lower()
-        contents = await file.read()
+        filename = (file.filename or "").lower()
+        if not filename.endswith((".csv", ".xlsx", ".xls")):
+            raise HTTPException(status_code=400, detail="Unsupported file format. Please upload CSV or XLSX.")
+        max_upload_bytes = 15 * 1024 * 1024
+        contents = await file.read(max_upload_bytes + 1)
+        if len(contents) > max_upload_bytes:
+            raise HTTPException(status_code=413, detail="Uploaded dataset exceeds the 15 MB limit.")
+        if not contents:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
         
         # Parse into Pandas DataFrame
         if filename.endswith(".csv"):
@@ -281,7 +267,10 @@ async def upload_custom_dataset(
         df['regime'] = hmm.predict(df['log_returns'], df['rolling_volatility'])
         
         # Save to DuckDB under custom ticker name
-        custom_ticker = f"UPLOAD_{ticker_name.upper().replace(' ', '_')}"
+        normalized_name = re.sub(r"[^A-Z0-9_]", "_", ticker_name.upper().strip())[:48].strip("_")
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="Please provide a valid dataset name.")
+        custom_ticker = f"UPLOAD_{normalized_name}"
         
         # Clean NaN/inf values to prevent JSON serialization crash
         df = df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -289,6 +278,10 @@ async def upload_custom_dataset(
         # Calculate technical indicators
         df['rsi'] = calculate_rsi(df['close'])
         df['macd'] = calculate_macd(df['close'])
+        df['atr'] = calculate_atr(df['high'], df['low'], df['close'])
+        df['bb_pct'] = calculate_bollinger_position(df['close'])
+        df['obv'] = calculate_obv(df['close'], df['volume'])
+        df['rolling_skew'], df['rolling_kurt'] = calculate_rolling_skew_kurt(df['log_returns'])
 
         features_df = pd.DataFrame({
             'timestamp': df['timestamp'],
@@ -300,10 +293,15 @@ async def upload_custom_dataset(
             'sentiment_score': df['sentiment_score'].fillna(0.0),
             'rolling_volatility': df['rolling_volatility'].fillna(0.0),
             'rsi': df['rsi'].fillna(50.0),
-            'macd': df['macd'].fillna(0.0)
+            'macd': df['macd'].fillna(0.0),
+            'atr': df['atr'].fillna(0.0),
+            'bb_pct': df['bb_pct'].fillna(0.5),
+            'obv': df['obv'].fillna(0.0),
+            'rolling_skew': df['rolling_skew'].fillna(0.0),
+            'rolling_kurt': df['rolling_kurt'].fillna(0.0)
         })
         
-        db_manager.execute(f"DELETE FROM processed_features WHERE ticker = '{custom_ticker}'")
+        db_manager.execute("DELETE FROM processed_features WHERE ticker = ?", [custom_ticker])
         db_manager.save_dataframe("processed_features", features_df, if_exists="append")
         
         return {
@@ -313,9 +311,11 @@ async def upload_custom_dataset(
             "data_count": len(df),
             "preview": df.tail(100).to_dict(orient="records")
         }
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Custom file uploader failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Dataset processing failed; inspect server logs.") from e
 
 @app.post("/api/pipeline/run")
 def trigger_pipeline(
@@ -471,7 +471,7 @@ def trigger_pipeline(
         })
 
         # Remove previous custom files with same name to prevent accumulation
-        db_manager.execute(f"DELETE FROM processed_features WHERE ticker = '{ticker}'")
+        db_manager.execute("DELETE FROM processed_features WHERE ticker = ?", [ticker])
         db_manager.save_dataframe("processed_features", features_df, if_exists="append")
         
         update_training_state(
@@ -536,7 +536,7 @@ def trigger_pipeline(
             step_label=f"Pipeline failure: {str(e)}",
             pct=0.0
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e
 
 @app.get("/api/data/preview")
 def get_data_preview(
@@ -571,7 +571,7 @@ def get_data_preview(
             "data": df.to_dict(orient="records")
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e
 
 @app.post("/api/pipeline/predict")
 def predict_forecast_envelope(
@@ -827,7 +827,7 @@ def predict_forecast_envelope(
     except Exception as e:
         update_training_state(phase="idle", model="", step_label="", pct=0.0, epoch=0, total_epochs=0)
         print(f"Prediction failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e
 
 
 @app.post("/api/pipeline/backtest")
@@ -872,7 +872,7 @@ def trigger_backtesting(
         }
     except Exception as e:
         print(f"Backtesting execution failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e
 
 @app.post("/api/math/cointegration")
 def calculate_cointegration(
@@ -921,7 +921,7 @@ def calculate_cointegration(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e
 
 @app.post("/api/math/var")
 def calculate_var(
@@ -966,4 +966,4 @@ def calculate_var(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Processing failed; inspect server logs.") from e

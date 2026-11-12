@@ -1,18 +1,3 @@
-import sys
-# Mask curl_cffi from being imported by yfinance to prevent TLS certificate errors
-sys.modules['curl_cffi'] = None
-sys.modules['curl_cffi.requests'] = None
-
-import ssl
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Disable standard library SSL validation
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-
 import os
 import requests
 import numpy as np
@@ -20,13 +5,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from typing import Optional, Dict, Any, List
-
-# Disable requests validation globally
-original_requests_request = requests.Session.request
-def patched_requests_request(self, method, url, *args, **kwargs):
-    kwargs['verify'] = False
-    return original_requests_request(self, method, url, *args, **kwargs)
-requests.Session.request = patched_requests_request
 
 
 # Try imports for optional libraries

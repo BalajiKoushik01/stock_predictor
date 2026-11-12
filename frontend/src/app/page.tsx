@@ -1,5 +1,7 @@
 'use client';
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Activity, 
@@ -155,7 +157,7 @@ export default function Dashboard() {
 
       pollingIntervalRef.current = setInterval(async () => {
         try {
-          const res = await fetch('http://localhost:8000/api/pipeline/progress');
+          const res = await fetch(`${API_BASE_URL}/api/pipeline/progress`);
           if (res.ok) {
             const data = await res.json();
             setProgressState(data);
@@ -202,7 +204,7 @@ export default function Dashboard() {
       const tickerList = cointTickers.split(',').map(t => t.trim().toUpperCase());
       if (tickerList.length < 2) throw new Error("Please enter at least 2 comma-separated tickers.");
       const queryParams = tickerList.map(t => `tickers=${t}`).join('&');
-      const res = await fetch(`http://localhost:8000/api/math/cointegration?${queryParams}`, {
+      const res = await fetch(`${API_BASE_URL}/api/math/cointegration?${queryParams}`, {
         method: 'POST'
       });
       if (!res.ok) {
@@ -235,7 +237,7 @@ export default function Dashboard() {
       if (!varTarget.trim()) throw new Error("Target ticker is required.");
       if (macroList.length === 0 || !macroList[0]) throw new Error("Please enter at least 1 macro index or comparison ticker.");
       const queryParams = macroList.map(t => `macro_tickers=${t}`).join('&');
-      const res = await fetch(`http://localhost:8000/api/math/var?target_ticker=${varTarget.trim().toUpperCase()}&${queryParams}&lags=${varLags}`, {
+      const res = await fetch(`${API_BASE_URL}/api/math/var?target_ticker=${varTarget.trim().toUpperCase()}&${queryParams}&lags=${varLags}`, {
         method: 'POST'
       });
       if (!res.ok) {
@@ -274,7 +276,7 @@ export default function Dashboard() {
     }
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/stocks/search?q=${encodeURIComponent(searchQuery.trim())}`);
+        const res = await fetch(`${API_BASE_URL}/api/stocks/search?q=${encodeURIComponent(searchQuery.trim())}`);
         if (res.ok) {
           const result = await res.json();
           setSuggestions(Array.isArray(result) ? result : []);
@@ -313,7 +315,7 @@ export default function Dashboard() {
         return;
       }
       // Fallback: fetch from DB preview endpoint
-      const dataRes = await fetch(`http://localhost:8000/api/data/preview?ticker=${targetTicker.toUpperCase()}`);
+      const dataRes = await fetch(`${API_BASE_URL}/api/data/preview?ticker=${targetTicker.toUpperCase()}`);
       if (!dataRes.ok) throw new Error('Could not fetch aligned datasets.');
       const dataResult = await dataRes.json();
       const rows = (dataResult.data || []).map((r: any) => ({
@@ -350,7 +352,7 @@ export default function Dashboard() {
     setEnsembleWeights(null);
     try {
       const startDate = isIpoData ? '1900-01-01' : '';
-      const res = await fetch(`http://localhost:8000/api/pipeline/run?ticker=${t}&start_date=${startDate}`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}/api/pipeline/run?ticker=${t}&start_date=${startDate}`, { method: 'POST' });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || 'Pipeline computation failed.');
@@ -386,7 +388,7 @@ export default function Dashboard() {
     setPredicting(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/pipeline/predict?ticker=${t}&horizon_steps=${horizon}`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}/api/pipeline/predict?ticker=${t}&horizon_steps=${horizon}`, { method: 'POST' });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || 'Forecasting models execution failed.');
@@ -421,7 +423,7 @@ export default function Dashboard() {
     setBacktesting(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/pipeline/backtest?ticker=${t}&horizon_steps=${horizon}`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}/api/pipeline/backtest?ticker=${t}&horizon_steps=${horizon}`, { method: 'POST' });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || 'Out-of-sample backtester failed.');
@@ -450,7 +452,7 @@ export default function Dashboard() {
     const baseName = file.name.split('.')[0];
 
     try {
-      const res = await fetch(`http://localhost:8000/api/pipeline/upload?ticker_name=${baseName}`, {
+      const res = await fetch(`${API_BASE_URL}/api/pipeline/upload?ticker_name=${baseName}`, {
         method: 'POST',
         body: formData
       });

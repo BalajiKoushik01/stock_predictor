@@ -69,15 +69,6 @@ class DatabaseManager:
                 )
             """)
 
-            # If the table exists but is missing the new columns, recreate it
-            try:
-                cols = conn.execute("PRAGMA table_info(processed_features)").df()
-                if not cols.empty and len(cols) < 15:
-                    print("Updating processed_features table schema to include institutional indicators...")
-                    conn.execute("DROP TABLE processed_features")
-            except Exception as pe:
-                print(f"Error checking processed_features table: {pe}")
-
             # 4. Final Preprocessed Feature Table for ML ingestion
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS processed_features (
@@ -100,6 +91,12 @@ class DatabaseManager:
                 )
             """)
 
+            # Non-destructive migration for older databases.
+            existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(processed_features)").fetchall()}
+            additional_features = ("atr", "bb_pct", "obv", "rolling_skew", "rolling_kurt")
+            for column in additional_features:
+                if column not in existing_columns:
+                    conn.execute(f'ALTER TABLE processed_features ADD COLUMN "{column}" DOUBLE')
             # 5. Benchmark Data Table (e.g. Nifty 50 / ^NSEI close prices)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS benchmark_data (
@@ -146,6 +143,8 @@ class DatabaseManager:
 
         conn = self.get_connection()
         try:
+            if table_name not in {"processed_features", "ohlcv_data", "options_microstructure", "sentiment_scores", "benchmark_data", "fundamental_metrics"}:
+                raise ValueError("Unsupported table name")
             if if_exists == "replace":
                 conn.execute(f"DELETE FROM {table_name}")
             
@@ -173,13 +172,13 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def execute(self, query: str):
+    def execute(self, query: str, params=None):
         """
         Executes a SQL query directly on the DuckDB database connection.
         """
         conn = self.get_connection()
         try:
-            conn.execute(query)
+            conn.execute(query, params or [])
         except Exception as e:
             print(f"Database execution error: {e}")
             raise e
