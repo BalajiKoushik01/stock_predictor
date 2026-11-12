@@ -93,8 +93,12 @@ class DatabaseManager:
 
             # Non-destructive migration for older databases.
             existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(processed_features)").fetchall()}
-            additional_features = ("atr", "bb_pct", "obv", "rolling_skew", "rolling_kurt")
-            for column in additional_features:
+            expected_features = (
+                "close_raw", "close_ffd", "close_emd_smoothed", "pcr_oi",
+                "sentiment_score", "rolling_volatility", "rsi", "macd", "atr",
+                "bb_pct", "obv", "rolling_skew", "rolling_kurt",
+            )
+            for column in expected_features:
                 if column not in existing_columns:
                     conn.execute(f'ALTER TABLE processed_features ADD COLUMN "{column}" DOUBLE')
             # 5. Benchmark Data Table (e.g. Nifty 50 / ^NSEI close prices)
@@ -150,7 +154,7 @@ class DatabaseManager:
             
             # DuckDB natively reads local pandas DataFrames directly from python scope
             # by executing SQL on the DataFrame variable name 'df'
-            conn.execute(f"INSERT OR REPLACE INTO {table_name} SELECT * FROM df")
+            conn.execute(f"INSERT OR REPLACE INTO {table_name} BY NAME SELECT * FROM df")
             print(f"Successfully saved {len(df)} rows to {table_name}.")
         except Exception as e:
             print(f"Error saving DataFrame to {table_name}: {e}")
