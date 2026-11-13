@@ -28,9 +28,27 @@ The compose file exposes ports 8000 and 3000 and mounts source directories for d
 
 You can also install `backend/requirements.txt` in a Python virtual environment and run the web client from `frontend/` with `npm install && npm run dev`. Review the backend startup entry point before running it outside Docker.
 
-## Security warning — action required
+## Security and deployment status
 
-**Do not deploy the current backend to a public production environment.** At the time of review, `backend/app/main.py` disables TLS certificate verification and monkey-patches the requests client to set `verify=False`. This weakens protection against interception of financial data and other network traffic. Remove those overrides, use verified CA certificates and test HTTPS data sources before any deployment. The current FastAPI CORS configuration also needs restrictive origins and credential handling.
+The blanket TLS verification bypass and permissive CORS settings identified in the earlier version were addressed in the November 2026 code remediation. The current FastAPI application uses the `ALLOWED_ORIGINS` environment variable and local development defaults. The database layer also includes a non-destructive migration for missing feature columns and tests for selected query-safety behavior.
+
+**This remains an experimental research application, not a publicly hardened investment platform.** It requires authentication, upload controls, network review, financial-data provider licensing and external model validation before a production release.
+
+### Verification
+
+```bash
+# Backend unit tests (install backend test requirements first)
+cd backend
+python -m unittest discover -s tests -v
+cd ..
+
+# Frontend
+cd frontend
+npm ci
+npm run build
+```
+
+See [engineering status](docs/ENGINEERING_STATUS.md) for additional release gates.
 
 ## Forecasts and backtests
 
